@@ -1063,12 +1063,13 @@ function updateTimingUI(){
   timingRing.style.opacity = (active || staggering) ? '1' : '0';
   if (active && !staggering){
     // 円の大きさはボディの縁同士の間隔（gap）に連動し、gap=0（接触）で点になる。
-    // 2次曲線なので、遠いときは1単位あたり大きく縮み、近いときは縮みが緩やかに
-    // なって、ドットになる最後の瞬間が読みやすくなる
+    // 平方根カーブなので、遠いときは縮みが遅く、近くなるにつれて徐々に速く縮む。
+    // 中距離でも円のサイズが保たれて判定円として認識しやすく、最後はドットへ
+    // 吸い込まれるように縮む
     const dist = Math.hypot(C.x - P.x, C.z - P.z);
     const gap = Math.max(0, dist - (P.stats.radius + C.stats.radius));
     const k = Math.min(1, gap / GAP_MAX);
-    timingRing.style.transform = `scale(${(k * k).toFixed(3)})`;
+    timingRing.style.transform = `scale(${Math.sqrt(k).toFixed(3)})`;
   }
   timingRing.classList.toggle('alarm', staggering);
   if (!staggering && feedbackUntil && nowS() > feedbackUntil){
