@@ -79,6 +79,7 @@
   #power-fill{ height:100%; width:0%; background:linear-gradient(90deg,#e8a34c,#d23c1e); }
   #launch-btn{ touch-action:none; user-select:none; -webkit-user-select:none; }
   #launch-btn:disabled{ opacity:.45; box-shadow:none; }
+  #launch-btn.boosting{ background:#d23c1e; box-shadow:0 4px 0 #8e2412, 0 8px 18px rgba(110,69,32,.3); }
   #battle-msg{ font-size:14px; font-weight:700; color:#6e4520; text-shadow:0 1px 0 rgba(255,250,238,.9);
     min-height:1.3em; }
 
@@ -289,6 +290,11 @@ function buildTopMesh(sel, side){
   shaft.castShadow = true;
   spinG.add(shaft);
 
+  // 瀕死サイン用：本体（実と帽子）のマテリアルと元の色を覚えておく
+  root.userData.blink = [
+    { mat: nutMat, base: new THREE.Color(colors.nut) },
+    { mat: capMat, base: new THREE.Color(colors.cap) },
+  ];
   root.userData.spinG = spinG;
   return root;
 }
@@ -358,6 +364,15 @@ const TENSION_PULL = 0.5;   // テンション1段階あたりの引き寄せ加
 const TENSION_CAP = 8;      // テンション効果の上限段階
 const OPENING_PULL = 1.5;   // 序盤ブースト：発射直後だけ働く追加の引き寄せ加速度（最大値）
 const OPENING_TIME = 5.0;   // 序盤ブーストが線形に減衰して消えるまでの秒数（初接触でも終了）
+/* --- 相殺エスカレーション（相殺を重ねるほど試合が加速する） --- */
+const DRAW_KB_RATE = 0.25;  // 相殺1回ごとに相殺ノックバックが増える割合（×(1 + 0.25×相殺回数)）
+const PACE_STEP = 0.10;     // 相殺1回ごとのペース倍率の上昇（+10%）
+const PACE_CAP = 2.0;       // ペース倍率の上限
+/* --- ブーストボタン（プレイヤー専用） --- */
+const BOOST_MULT = 1.5;     // ブースト中の速度倍率
+const BOOST_KEEP = 1.5;     // ボタンを離した後もブースト速度を維持する秒数
+const BOOST_FADE = 1.0;     // その後、通常速度へ戻るまでにかける秒数
+const BOOST_DMG = 2;        // ブースト中にジャストの勝敗がついたときのダメージ倍率
 /* スタート方式：時計の文字盤の位置から、目標の時計位置へ真っ直ぐ発射する直進ダッシュ。
    プレイヤーは7時→11時（左側を上がる）、CPUは1時→5時（右側を下がる）で、
    直進＋すり鉢の傾斜＋周回力が合わさって時計回りの流れになる */
@@ -702,6 +717,11 @@ let phase = 'ready';      // ready | fight | done
 let charging = false, power = 0;
 let fightTime = 0, cpuTimer = -1;
 let tension = 0;            // 相殺で貯まるテンション（引き寄せの強さ）
+let drawCount = 0;          // 相殺回数（試合中永続。エスカレーションのカウンタ）
+let paceMult = 1;           // 相殺で上がる移動速度の倍率（両コマ共通・試合中永続）
+let boostHeld = false;      // ブーストボタンを押しているか
+let boostPointerId = null;  // ブーストを押したポインタのID（多点タッチでの誤解除防止）
+let boostReleaseT = -100;   // ブーストボタンを最後に離した時刻
 let dyingCounter = 0;       // 瀕死になった順序の採番（どちらが先に瀕死になったかの記録用）
 let firstClash = false;     // 初接触が済んだかどうか（序盤ブーストの終了条件）
 let tapTimes = [];          // プレイヤーのタップ時刻（performance.now系）
@@ -744,6 +764,8 @@ function startBattle(pBuild = selection){
   fighters = { player: makeFighter(pBuild, 'player'), cpu: makeFighter(cpuBuild, 'cpu') };
   phase = 'ready'; charging = false; power = 0; fightTime = 0; cpuTimer = -1;
   tension = 0; firstClash = false; tapTimes = []; pendingClash = null; feedbackUntil = 0;
+  drawCount = 0; paceMult = 1;
+  boostHeld = false; boostPointerId = null; boostReleaseT = -100;
   dyingCounter = 0;
   clashMsg.textContent = '';
   timingRing.classList.remove('good', 'draw', 'bad');
@@ -752,6 +774,8 @@ function startBattle(pBuild = selection){
   spinBarP.style.width = '100%'; spinBarC.style.width = '100%';
   battleMsg.textContent = '';
   launchBtn.disabled = false;
+  launchBtn.textContent = '長押しでパワー';
+  launchBtn.classList.remove('boosting');
 }
 
 /* 時計の文字盤上の位置（h時方向・半径r）の座標。
@@ -855,6 +879,9 @@ function resolvePendingClash(){
   const pOK = demoMode ? Math.random() < DEMO_JUST_RATE
                        : tapTimes.some(t => Math.abs(t - pc.t) <= TAP_WINDOW);
   const cOK = Math.random() < (demoMode ? DEMO_JUST_RATE : CPU_TAP_RATE);
+  // ブーストの効果が残っている間（押下中・維持中・減衰中）に解決した衝突は、
+  // ジャストの勝敗ダメージが BOOST_DMG 倍になる（勝てば大きく与え、負ければ大きく受ける）
+  const boostRisk = currentBoostMult() > 1;
   // 瀕死のコマが関わる衝突は、通常の結果適用より先に決着／復活を判定する。
   // 瀕死側がジャストできれば復活して、この衝突は通常どおり解決する。
   // 瀕死側がジャストできなければ、その場で決着する
@@ -882,10 +909,12 @@ function resolvePendingClash(){
     // 相殺：両者ノーダメージ。まず互いに跳ね返り（ノックバック）、
     // その後テンションの引き寄せで再接近する流れにする
     tension++;
+    drawCount++;   // 相殺エスカレーション：回数を積み上げる（試合中リセットしない）
     const dx = C.x - P.x, dz = C.z - P.z;
     const d = Math.hypot(dx, dz);
     if (d > 0.01){
-      const kb = KB_PUSH * 0.85;   // 敗者への追加ノックバックより少し弱く、両者へ均等に
+      // ノックバックは相殺回数に応じて大きくなる（今回の相殺自体を含む）
+      const kb = KB_PUSH * 0.85 * (1 + DRAW_KB_RATE * drawCount);
       // 法線方向の跳ね返りに、各コマの現在位置における時計回りの接線成分を少し混ぜる。
       // 接線は周回力と同じ定義（位置ベクトルを90°回した向き × orbit）を使い、
       // 跳ね返った後も真っ直ぐ離れず、周回の流れを保ったまま離れるようにする
@@ -900,19 +929,29 @@ function resolvePendingClash(){
       pushWithTan(P, -1);
       pushWithTan(C, +1);
     }
+    // ペース倍率を永続的に引き上げ、両コマの現在の速度にも比率分を即座に掛けて
+    // 「実際に速くなり続ける」形にする（上限 PACE_CAP）。速度上限・周回ペースへは
+    // stepBattle 側で paceMult を介して反映される
+    const newPace = Math.min(PACE_CAP, 1 + PACE_STEP * drawCount);
+    if (newPace > paceMult){
+      const kick = newPace / paceMult;
+      paceMult = newPace;
+      P.vx *= kick; P.vz *= kick;
+      C.vx *= kick; C.vz *= kick;
+    }
     triggerClashFX((P.x + C.x) / 2, (P.z + C.z) / 2, 0.55, true);
     addHitstop(0.06);
     showClash('draw', '相殺！');
   } else if (pOK){
     C.fails++;
-    C.spin -= pc.dmgToC * CLASH_WIN_DMG;
+    C.spin -= pc.dmgToC * CLASH_WIN_DMG * (boostRisk ? BOOST_DMG : 1);
     pushLoser(C, P);
     triggerClashFX(C.x, C.z, 0.85, true);
     addHitstop(0.08);
     showClash('good', 'ジャスト！');
   } else if (cOK){
     P.fails++;
-    P.spin -= pc.dmgToP * CLASH_WIN_DMG;
+    P.spin -= pc.dmgToP * CLASH_WIN_DMG * (boostRisk ? BOOST_DMG : 1);
     pushLoser(P, C);
     triggerClashFX(P.x, P.z, 0.85, true);
     addHitstop(0.08);
@@ -938,8 +977,11 @@ function stepBattle(dt){
     if (cpuTimer <= 0) launchFighter(C, CPU_START_HOUR, CPU_TARGET_HOUR, 45 + Math.random() * 50);
   }
 
+  const boostMult = currentBoostMult();   // プレイヤーのブースト倍率（このフレームの値）
   for (const f of [P, C]){
     if (!f.launched) continue;
+    // このコマの速度スケール：両コマ共通のペース倍率 ×（プレイヤーのみ）ブースト倍率
+    const spdScale = paceMult * (f === P ? boostMult : 1);
     // スピン減衰（かいてんが高いほど長持ち）
     f.spin -= spinDecayPerSec(f.stats.st) * dt;
     const d = Math.hypot(f.x, f.z);
@@ -959,23 +1001,24 @@ function stepBattle(dt){
       if (spd > 0.05){
         // 速度に垂直な向きの力（強さはスピン残量に比例）。両者とも時計回り
         const px = -f.vz / spd, pz = f.vx / spd;
-        const drive = 1.15 * (Math.max(0, f.spin) / 100);
+        const drive = 1.15 * (Math.max(0, f.spin) / 100) * spdScale;
         f.vx += px * f.orbit * drive * dt;
         f.vz += pz * f.orbit * drive * dt;
       }
-      if (spd < 0.55){
+      if (spd < 0.55 * spdScale){
         // 止まりそうになったら、土俵の接線方向へそっと押し出す
         let tx, tz;
         if (d > 0.3){ tx = (-f.z / d) * f.orbit; tz = (f.x / d) * f.orbit; }
         else { tx = f.orbit; tz = 0; }
-        f.vx += tx * 2.4 * dt;
-        f.vz += tz * 2.4 * dt;
+        f.vx += tx * 2.4 * spdScale * dt;
+        f.vz += tz * 2.4 * spdScale * dt;
       }
     }
     // 速度の上限（斜面加速での暴走防止）
     {
       const spd = Math.hypot(f.vx, f.vz);
-      if (spd > 13){ f.vx *= 13 / spd; f.vz *= 13 / spd; }
+      const cap = 13 * spdScale;
+      if (spd > cap){ f.vx *= cap / spd; f.vz *= cap / spd; }
     }
     // フラつき：スピンが弱いほど速度にノイズ（あんていで軽減）
     if (f.spin < 50){
@@ -1079,8 +1122,17 @@ function stepBattle(dt){
   }
 }
 
+/* --- 瀕死サイン（本体とゲージの赤色点滅） --- */
+const DYING_RED = new THREE.Color(0xe0331e);
+const DYING_PERIOD = 0.4;   // 点滅の周期（秒）
+const GAUGE_P = 'linear-gradient(90deg,#e8a34c,#cf6f2a)';
+const GAUGE_C = 'linear-gradient(90deg,#a9c46a,#7a9a4d)';
+const GAUGE_RED_ON  = 'linear-gradient(90deg,#f0563f,#d42a16)';
+const GAUGE_RED_OFF = 'linear-gradient(90deg,#93382c,#701a10)';
+
 function syncFighters(dt, t){
   if (!fighters) return;
+  const blinkOn = (t % DYING_PERIOD) < DYING_PERIOD / 2;
   for (const f of [fighters.player, fighters.cpu]){
     if (!f.launched) continue;
     const d = Math.hypot(f.x, f.z);
@@ -1091,24 +1143,53 @@ function syncFighters(dt, t){
     const tilt = (1 - spinNow / 100) * 0.30;
     f.mesh.rotation.x = Math.cos(t * 6.7 + f.phase) * tilt * 0.5;
     f.mesh.rotation.z = Math.sin(t * 8.0 + f.phase) * tilt * 0.5;
+    // 瀕死サイン：本体（実と帽子）を赤く点滅させる。復活すれば元の色に戻る
+    if (f.mesh.userData.blink){
+      for (const b of f.mesh.userData.blink){
+        if (f.dying && blinkOn){
+          b.mat.color.copy(b.base).lerp(DYING_RED, 0.78);
+          b.mat.emissive.copy(DYING_RED);
+          b.mat.emissiveIntensity = 0.5;
+        } else if (f.dying){
+          b.mat.color.copy(b.base).lerp(DYING_RED, 0.28);
+          b.mat.emissive.setRGB(0, 0, 0);
+          b.mat.emissiveIntensity = 0;
+        } else {
+          b.mat.color.copy(b.base);
+          b.mat.emissive.setRGB(0, 0, 0);
+          b.mat.emissiveIntensity = 0;
+        }
+      }
+    }
   }
   spinBarP.style.width = Math.max(0, fighters.player.spin) + '%';
   spinBarC.style.width = Math.max(0, fighters.cpu.spin) + '%';
+  // 瀕死サイン：そのコマ側のゲージも赤く点滅させる
+  spinBarP.style.background = fighters.player.dying ? (blinkOn ? GAUGE_RED_ON : GAUGE_RED_OFF) : GAUGE_P;
+  spinBarC.style.background = fighters.cpu.dying ? (blinkOn ? GAUGE_RED_ON : GAUGE_RED_OFF) : GAUGE_C;
 }
 
 /* --- 発射操作（長押し） --- */
 launchBtn.addEventListener('pointerdown', e => {
   e.preventDefault();
   ensureAudio();
-  if (phase !== 'ready') return;
-  charging = true; power = 0;
+  if (demoMode) return;   // デモ対戦ではボタン自体が無効
+  if (phase === 'ready'){
+    charging = true; power = 0;
+  } else if (phase === 'fight'){
+    // 発射後は同じボタンがブーストボタンとして働く
+    boostHeld = true;
+    boostPointerId = e.pointerId;
+  }
 });
 /* 両コマを同時に発射してバトルを開始する（通常モード・デモ対戦で共用） */
 function launchBoth(pPower, cPower){
   launchFighter(fighters.player, PLAYER_START_HOUR, PLAYER_TARGET_HOUR, pPower);
   launchFighter(fighters.cpu, CPU_START_HOUR, CPU_TARGET_HOUR, cPower);
   phase = 'fight'; fightTime = 0; cpuTimer = -1;
-  launchBtn.disabled = true;
+  // 発射後は同じボタンを「ブースト」に切り替える（デモ対戦ではボタンを出さないので無効のまま）
+  if (demoMode) launchBtn.disabled = true;
+  else { launchBtn.disabled = false; launchBtn.textContent = 'ブースト'; }
   powerFill.style.width = '0%';
 }
 function releaseLaunch(){
@@ -1120,14 +1201,40 @@ function releaseLaunch(){
 window.addEventListener('pointerup', releaseLaunch);
 window.addEventListener('pointercancel', releaseLaunch);
 
+/* --- ブーストの状態遷移 ---
+   押下中は BOOST_MULT。離すと BOOST_KEEP 秒はそのまま維持し、
+   続く BOOST_FADE 秒で通常速度（×1.0）へ戻る。維持・減衰中に再び押せば即ブーストに戻る */
+function currentBoostMult(){
+  if (demoMode || phase !== 'fight') return 1;
+  if (boostHeld) return BOOST_MULT;
+  const since = nowS() - boostReleaseT;
+  if (since < BOOST_KEEP) return BOOST_MULT;
+  if (since < BOOST_KEEP + BOOST_FADE) return 1 + (BOOST_MULT - 1) * (1 - (since - BOOST_KEEP) / BOOST_FADE);
+  return 1;
+}
+/* ブーストの解除は、押したポインタが離れたときだけ（別の指のタップで誤って解除しない） */
+function releaseBoost(e){
+  if (boostHeld && e.pointerId === boostPointerId){
+    boostHeld = false;
+    boostPointerId = null;
+    boostReleaseT = nowS();
+  }
+}
+window.addEventListener('pointerup', releaseBoost);
+window.addEventListener('pointercancel', releaseBoost);
+
 /* --- 衝突タイミング用のタップ記録（バトル中、画面のどこでもよい） --- */
-window.addEventListener('pointerdown', () => {
+window.addEventListener('pointerdown', e => {
+  // ブーストボタン上のポインタ操作はジャスト判定のタップとして記録しない
+  if (e.target.closest && e.target.closest('#launch-btn')) return;
   if (screen === 'battle' && phase === 'fight') tapTimes.push(nowS());
 });
 
 /* --- タイミング円の表示更新 --- */
 function updateTimingUI(){
   if (!fighters) { timingRing.style.opacity = '0'; return; }
+  // ブーストが効いている間はボタンを赤くして状態を示す
+  launchBtn.classList.toggle('boosting', !demoMode && phase === 'fight' && currentBoostMult() > 1);
   const P = fighters.player, C = fighters.cpu;
   const active = phase === 'fight' && P.launched && C.launched;
   timingRing.style.opacity = active ? '1' : '0';
