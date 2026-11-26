@@ -56,9 +56,9 @@
   .stats{ margin:12px 0 4px; display:grid; grid-template-columns:1fr 1fr; gap:5px 18px; }
   .stat{ display:flex; align-items:center; gap:8px; font-size:12px; }
   .stat .slabel{ width:4.2em; color:#7a5a36; }
-  .stat .bar{ flex:1; height:8px; background:#eee0c3; border-radius:4px; overflow:hidden; }
-  .stat .fill{ height:100%; width:0%; border-radius:4px;
-    background:linear-gradient(90deg,#e8a34c,#cf6f2a); transition:width .25s; }
+  .stat .pips{ font-size:13px; letter-spacing:3px; line-height:1; }
+  .stat .pips .on{ color:var(--accent); }
+  .stat .pips .off{ color:#e0cda1; }
   #build-panel .btn{ width:100%; margin-top:12px; }
 
   /* ---------- バトル ---------- */
@@ -317,6 +317,8 @@ previewCam.lookAt(0, 1.0, 0);
 /* --- バトル用シーン --- */
 const ARENA_R = 6;                       // 土俵の半径
 const bowlY = r => 1.2 * (r / ARENA_R) * (r / ARENA_R);  // すり鉢の高さ（中心→縁で1.2）
+const LIP_R = 5.9;          // 縁のヘリの位置（中心からの距離）
+const LIP_SPEED = 3.2;      // ヘリを越えるのに必要な外向き（径方向）の速度
 const battleScene = new THREE.Scene();
 battleScene.background = new THREE.Color(0xf7ead2);
 addLights(battleScene, 9);
@@ -330,21 +332,50 @@ const battleCam = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
 
   const bowl = latheFrom([
     [0.001,0.00],[1.0,0.03],[2.0,0.13],[3.0,0.30],[4.0,0.53],[5.0,0.83],[5.5,1.01],[6.0,1.20],[6.35,1.38],[6.6,1.12],
-  ], new THREE.MeshStandardMaterial({ color:0xb98a52, roughness:0.85, side:THREE.DoubleSide }));
+  ], new THREE.MeshStandardMaterial({ color:0xffffff, vertexColors:true, roughness:0.85, side:THREE.DoubleSide }));
   bowl.castShadow = false; bowl.receiveShadow = true;
+  // 中心からの距離に応じた色の濃淡（中心は深く、縁にいくほど明るく）で窪みを表現
+  {
+    const pos = bowl.geometry.attributes.position;
+    const cols = new Float32Array(pos.count * 3);
+    const cIn = new THREE.Color(0x7c4f24), cMid = new THREE.Color(0xb98a52), cOut = new THREE.Color(0xe3b96e);
+    const tmp = new THREE.Color();
+    for (let i = 0; i < pos.count; i++){
+      const r = Math.hypot(pos.getX(i), pos.getZ(i));
+      const tt = Math.min(1, r / ARENA_R);
+      if (tt < 0.5) tmp.copy(cIn).lerp(cMid, tt * 2);
+      else tmp.copy(cMid).lerp(cOut, (tt - 0.5) * 2);
+      cols[i * 3] = tmp.r; cols[i * 3 + 1] = tmp.g; cols[i * 3 + 2] = tmp.b;
+    }
+    bowl.geometry.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+  }
   battleScene.add(bowl);
 
+  // 縁（リム）：太く・濃くして土俵の輪郭と立ち上がりを強調
   const rim = new THREE.Mesh(
-    new THREE.TorusGeometry(6.35, 0.09, 10, 56),
-    new THREE.MeshStandardMaterial({ color:0x8a5a2a, roughness:0.8 }));
-  rim.rotation.x = Math.PI / 2; rim.position.y = 1.36;
+    new THREE.TorusGeometry(6.35, 0.13, 12, 56),
+    new THREE.MeshStandardMaterial({ color:0x6e4520, roughness:0.8 }));
+  rim.rotation.x = Math.PI / 2; rim.position.y = 1.38;
   battleScene.add(rim);
 
-  const ringLine = new THREE.Mesh(
-    new THREE.TorusGeometry(2.2, 0.022, 8, 48),
-    new THREE.MeshStandardMaterial({ color:0x9a6c38, roughness:0.9 }));
-  ringLine.rotation.x = Math.PI / 2; ringLine.position.y = bowlY(2.2) + 0.015;
-  battleScene.add(ringLine);
+  // 縁の内側の低いヘリ（唇状の盛り上がり）。リムより低く・細くして「ちょっとした」段差にする
+  const lip = new THREE.Mesh(
+    new THREE.TorusGeometry(LIP_R, 0.075, 10, 64),
+    new THREE.MeshStandardMaterial({ color:0x8a5a2a, roughness:0.8 }));
+  lip.rotation.x = Math.PI / 2; lip.position.y = bowlY(LIP_R) + 0.03;
+  battleScene.add(lip);
+
+  // 斜面に沿った同心円ライン（濃淡交互で、窪みの等高線として目で追えるように）
+  const ringMats = [
+    new THREE.MeshStandardMaterial({ color:0x7d5226, roughness:0.9 }),
+    new THREE.MeshStandardMaterial({ color:0xe6c07a, roughness:0.9 }),
+  ];
+  [1.2, 2.2, 3.2, 4.2, 5.2].forEach((r, i) => {
+    const line = new THREE.Mesh(new THREE.TorusGeometry(r, 0.028, 8, 64), ringMats[i % 2]);
+    line.rotation.x = Math.PI / 2;
+    line.position.y = bowlY(r) + 0.012;
+    battleScene.add(line);
+  });
 }
 
 /* ================= 画面遷移 ================= */
@@ -378,10 +409,13 @@ function updateStats(){
   const wrap = document.getElementById('stats');
   wrap.innerHTML = '';
   for (const [key, label] of STAT_KEYS){
+    // 内部値1〜12を5段階に換算（最低1、満点5）
+    const level = Math.max(1, Math.min(5, Math.round(st[key] / 12 * 5)));
+    const pips = `<span class="on">${'▶'.repeat(level)}</span>` +
+      `<span class="off">${'▷'.repeat(5 - level)}</span>`;
     const row = document.createElement('div');
     row.className = 'stat';
-    row.innerHTML = `<span class="slabel">${label}</span>` +
-      `<div class="bar"><div class="fill" style="width:${(st[key] / 12) * 100}%"></div></div>`;
+    row.innerHTML = `<span class="slabel">${label}</span><span class="pips">${pips}</span>`;
     wrap.appendChild(row);
   }
 }
@@ -541,6 +575,24 @@ function stepBattle(dt){
     }
     f.x += f.vx * dt;
     f.z += f.vz * dt;
+    // 縁のヘリ：外向きの勢いが弱ければ跳ね返して土俵内に留める。
+    // 径方向速度が LIP_SPEED 以上の強い勢いのときだけヘリを越えさせ、
+    // その先は従来どおり（縁の外の斜面で滑り落ちてリングアウト）。
+    {
+      const dLip = Math.hypot(f.x, f.z);
+      if (dLip > LIP_R && dLip <= ARENA_R + 0.5){
+        const nx = f.x / dLip, nz = f.z / dLip;
+        const vr = f.vx * nx + f.vz * nz;   // 外向きの径方向速度
+        if (vr < LIP_SPEED){
+          f.x = nx * LIP_R; f.z = nz * LIP_R;
+          if (vr > 0){
+            f.vx -= (1 + 0.55) * vr * nx;   // 反発係数0.55で跳ね返す
+            f.vz -= (1 + 0.55) * vr * nz;
+            f.spin -= 1.0;                  // ヘリに当たった分だけ少し回転を失う
+          }
+        }
+      }
+    }
     if (Math.hypot(f.x, f.z) > ARENA_R + 0.5){
       f.out = true; f.outTime = fightTime;
     }
