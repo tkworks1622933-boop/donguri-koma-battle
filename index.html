@@ -82,6 +82,26 @@
   #battle-msg{ font-size:14px; font-weight:700; color:#6e4520; text-shadow:0 1px 0 rgba(255,250,238,.9);
     min-height:1.3em; }
 
+  /* ---------- タイミング円 ---------- */
+  #timing-wrap{ display:flex; flex-direction:column; align-items:center; gap:4px;
+    height:150px; justify-content:flex-end; }
+  #timing-ring{ width:118px; height:118px; border-radius:50%; flex:none; position:relative;
+    border:4px solid var(--accent);
+    background:radial-gradient(circle, rgba(207,111,42,.20), rgba(207,111,42,.04) 70%);
+    opacity:0; transition:opacity .2s; }
+  #timing-ring::after{ content:''; position:absolute; left:50%; top:50%; width:10px; height:10px;
+    border-radius:50%; background:var(--accent-dark); transform:translate(-50%,-50%); }
+  #timing-ring.good{ border-color:#7a9a4d;
+    background:radial-gradient(circle, rgba(122,154,77,.35), rgba(122,154,77,.08) 70%); }
+  #timing-ring.draw{ border-color:#c9a227;
+    background:radial-gradient(circle, rgba(201,162,39,.35), rgba(201,162,39,.08) 70%); }
+  #timing-ring.bad{ border-color:#b0483a;
+    background:radial-gradient(circle, rgba(176,72,58,.32), rgba(176,72,58,.07) 70%); }
+  #timing-ring.alarm{ border-color:#d23c1e; animation:tblink .18s steps(2) infinite; }
+  @keyframes tblink{ 50%{ background:rgba(210,60,30,.40); } }
+  #clash-msg{ font-size:15px; font-weight:800; color:#6e4520; min-height:1.3em;
+    text-shadow:0 1px 0 rgba(255,250,238,.9); }
+
   /* ---------- 結果 ---------- */
   #screen-result{ align-items:center; justify-content:center; background:rgba(74,45,18,.35); }
   #result-card{ background:var(--panel); border-radius:22px; padding:30px 34px; text-align:center;
@@ -123,6 +143,7 @@
     <div class="hud-row"><span class="hname">CPU</span><div class="bar"><div class="fill" id="spin-cpu"></div></div></div>
   </div>
   <div id="power-wrap">
+    <div id="timing-wrap"><div id="timing-ring"></div><div id="clash-msg"></div></div>
     <div id="battle-msg">長押しでパワーをためて、はなして発射！</div>
     <div id="power-bar-wrap"><div id="power-fill"></div></div>
     <button id="launch-btn" class="btn">長押しでパワー</button>
@@ -319,6 +340,19 @@ const ARENA_R = 6;                       // 土俵の半径
 const bowlY = r => 1.2 * (r / ARENA_R) * (r / ARENA_R);  // すり鉢の高さ（中心→縁で1.2）
 const LIP_R = 5.9;          // 縁のヘリの位置（中心からの距離）
 const LIP_SPEED = 3.2;      // ヘリを越えるのに必要な外向き（径方向）の速度
+/* --- 衝突タイミング＆踏みとどまりの調整パラメータ --- */
+const TAP_WINDOW = 0.12;    // 衝突の前後この秒数以内のタップを成功とみなす
+const CPU_TAP_RATE = 0.5;   // CPUがタップ判定に成功する確率（将来の難易度設定の差し替え口）
+const CLASH_WIN_DMG = 1.6;  // タップの勝敗がついたとき、勝者が与えるダメージの倍率
+const KB_PUSH = 2.4;        // タップで負けた側への追加ノックバックの強さ
+const FAIL_KB_RATE = 0.15;  // 失敗回数1回ごとにノックバックが増える割合
+const TENSION_PULL = 0.35;  // テンション1段階あたりの引き寄せ加速度
+const TENSION_CAP = 8;      // テンション効果の上限段階
+const STAGGER_WINDOW = 0.25;// ヘリで踏みとどまるためのタップ猶予（秒）
+const STAGGER_SPIN_COST = 8;// 踏みとどまり成功時に失うスピン
+const PLAYER_PHI = -75 * Math.PI / 180;  // プレイヤーの発射位置（12時〜1時方向）
+const CPU_PHI = 105 * Math.PI / 180;     // CPUの発射位置（6時〜7時方向）
+const START_R = 4.6;        // 発射位置の中心からの距離
 const battleScene = new THREE.Scene();
 battleScene.background = new THREE.Color(0xf7ead2);
 addLights(battleScene, 9);
@@ -454,6 +488,13 @@ let cpuBuild = null;
 let phase = 'ready';      // ready | fight | done
 let charging = false, power = 0;
 let fightTime = 0, cpuTimer = -1;
+let tension = 0;            // 相殺で貯まるテンション（引き寄せの強さ）
+let tapTimes = [];          // プレイヤーのタップ時刻（performance.now系）
+let pendingClash = null;    // 判定待ちの衝突 { t, dmgToP, dmgToC }
+let feedbackUntil = 0;      // タイミング円の結果表示を消す時刻
+const nowS = () => performance.now() / 1000;
+const timingRing = document.getElementById('timing-ring');
+const clashMsg = document.getElementById('clash-msg');
 
 function randomBuild(){
   const pick = obj => {
@@ -471,6 +512,7 @@ function makeFighter(sel, side){
     sel, stats: calcStats(sel), mesh,
     x:0, z:0, vx:0, vz:0, spin:100,
     launched:false, out:false, outTime:0,
+    fails:0, stagger:null, lipPassed:false,
     phase: Math.random() * Math.PI * 2,
     spinDir: side === 'player' ? -1 : 1,
     orbit: side === 'player' ? 1 : -1,   // 土俵を周回する向き（互いに逆向き）
@@ -486,18 +528,30 @@ function startBattle(){
   }
   fighters = { player: makeFighter(selection, 'player'), cpu: makeFighter(cpuBuild, 'cpu') };
   phase = 'ready'; charging = false; power = 0; fightTime = 0; cpuTimer = -1;
+  tension = 0; tapTimes = []; pendingClash = null; feedbackUntil = 0;
+  clashMsg.textContent = '';
+  timingRing.classList.remove('good', 'draw', 'bad', 'alarm');
+  timingRing.style.opacity = '0';
   powerFill.style.width = '0%';
   spinBarP.style.width = '100%'; spinBarC.style.width = '100%';
   battleMsg.textContent = '長押しでパワーをためて、はなして発射！';
   launchBtn.disabled = false;
 }
 
-function launchFighter(f, fromX, powerVal){
-  f.x = fromX; f.z = (Math.random() - 0.5) * 1.2;
-  const ang = Math.atan2(-f.z, -f.x) + (Math.random() - 0.5) * 0.24;
+function launchFighter(f, phi, powerVal){
+  f.x = Math.cos(phi) * START_R;
+  f.z = Math.sin(phi) * START_R;
+  // 初速は接線方向が主体（土俵を周回する向き）＋少しだけ内向き。
+  // 接線の符号は周回力（orbit）と噛み合う向きにそろえ、回り続ける流れにする
+  let cx = -Math.sin(phi) * f.orbit * 0.88 - Math.cos(phi) * 0.30;
+  let cz =  Math.cos(phi) * f.orbit * 0.88 - Math.sin(phi) * 0.30;
+  const cl = Math.hypot(cx, cz); cx /= cl; cz /= cl;
+  const jitter = (Math.random() - 0.5) * 0.15;
+  const jx = cx * Math.cos(jitter) - cz * Math.sin(jitter);
+  const jz = cx * Math.sin(jitter) + cz * Math.cos(jitter);
   const speed = (5.2 + powerVal * 0.075) / Math.sqrt(f.stats.mass);
-  f.vx = Math.cos(ang) * speed;
-  f.vz = Math.sin(ang) * speed;
+  f.vx = jx * speed;
+  f.vz = jz * speed;
   f.spin = 100; f.launched = true;
   f.mesh.visible = true;
 }
@@ -518,17 +572,121 @@ function endBattle(win, reason){
   }, 700);
 }
 
+/* ================= 衝突タイミング判定 ================= */
+function showClash(kind, text){
+  clashMsg.textContent = text;
+  timingRing.classList.remove('good', 'draw', 'bad');
+  if (kind) timingRing.classList.add(kind);
+  feedbackUntil = nowS() + 0.7;
+}
+
+/* 衝突の物理（跳ね返り）は即時適用し、スピンダメージだけをここに預ける。
+   タップの「後から±TAP_WINDOW」も拾えるよう、窓が閉じてから resolvePendingClash で確定する */
+function registerClash(dmgToP, dmgToC){
+  if (pendingClash){
+    pendingClash.dmgToP += dmgToP;
+    pendingClash.dmgToC += dmgToC;
+  } else {
+    pendingClash = { t: nowS(), dmgToP, dmgToC };
+  }
+}
+
+function resolvePendingClash(){
+  if (!pendingClash || nowS() < pendingClash.t + TAP_WINDOW) return;
+  const pc = pendingClash;
+  pendingClash = null;
+  const P = fighters.player, C = fighters.cpu;
+  if (P.out || C.out) return;
+  const pOK = tapTimes.some(t => Math.abs(t - pc.t) <= TAP_WINDOW);
+  const cOK = Math.random() < CPU_TAP_RATE;
+  const pushLoser = (loser, winner) => {
+    const dx = loser.x - winner.x, dz = loser.z - winner.z;
+    const d = Math.hypot(dx, dz);
+    if (d < 0.01) return;
+    const kb = KB_PUSH * (1 + FAIL_KB_RATE * loser.fails);
+    loser.vx += (dx / d) * kb;
+    loser.vz += (dz / d) * kb;
+  };
+  if (pOK && cOK){
+    // 相殺：両者ノーダメージ。代わりにテンションが貯まって引き寄せが強くなる
+    tension++;
+    showClash('draw', '相殺！');
+  } else if (pOK){
+    C.fails++;
+    C.spin -= pc.dmgToC * CLASH_WIN_DMG;
+    pushLoser(C, P);
+    showClash('good', '成功！');
+  } else if (cOK){
+    P.fails++;
+    P.spin -= pc.dmgToP * CLASH_WIN_DMG;
+    pushLoser(P, C);
+    showClash('bad', '失敗…');
+  } else {
+    P.fails++; C.fails++;
+    P.spin -= pc.dmgToP;
+    C.spin -= pc.dmgToC;
+    showClash('bad', '失敗…');
+  }
+}
+
+/* ================= ヘリでの踏みとどまり ================= */
+function stepStagger(f, dt){
+  const st = f.stagger;
+  st.t += dt;
+  const isPlayer = f === fighters.player;
+  // プレイヤーは猶予ウィンドウ内のタップで即座に踏みとどまる
+  if (isPlayer && tapTimes.some(t => t >= st.startWall - 0.02)){
+    return resolveStagger(f, true);
+  }
+  if (st.t >= STAGGER_WINDOW){
+    resolveStagger(f, isPlayer ? false : st.cpuHold);
+  }
+}
+
+function resolveStagger(f, hold){
+  const st = f.stagger;
+  f.stagger = null;
+  const d = Math.hypot(f.x, f.z) || LIP_R;
+  const nx = f.x / d, nz = f.z / d;
+  if (hold){
+    // 弱い当たりのヘリ反発と同じ扱いで場内へ跳ね返す（コストにスピンを失う）
+    f.vx = st.vx; f.vz = st.vz;
+    const vr = st.vx * nx + st.vz * nz;
+    if (vr > 0){
+      f.vx -= (1 + 0.55) * vr * nx;
+      f.vz -= (1 + 0.55) * vr * nz;
+    }
+    f.x = nx * LIP_R; f.z = nz * LIP_R;
+    f.spin -= STAGGER_SPIN_COST;
+    if (f === fighters.player) showClash('good', '踏みとどまった！');
+    else showClash('draw', 'あいてが踏みとどまった！');
+  } else {
+    // 猶予を逃した：入ってきた速度のまま外へ滑り落ちる（リングアウト）
+    f.vx = st.vx; f.vz = st.vz;
+    f.lipPassed = true;
+  }
+}
+
 function stepBattle(dt){
   const P = fighters.player, C = fighters.cpu;
   fightTime += dt;
 
+  resolvePendingClash();
+
   if (cpuTimer > 0){
     cpuTimer -= dt;
-    if (cpuTimer <= 0) launchFighter(C, 4.6, 45 + Math.random() * 50);
+    if (cpuTimer <= 0) launchFighter(C, CPU_PHI, 45 + Math.random() * 50);
   }
 
   for (const f of [P, C]){
     if (!f.launched || f.out) continue;
+    if (f.stagger){
+      // ヘリの上でたたらを踏んでいる間は位置を固定し、スピンだけ減らす
+      f.spin -= Math.max(1.4, 7.6 - f.stats.st.spin * 0.55) * dt;
+      stepStagger(f, dt);
+      continue;
+    }
+    if (Math.hypot(f.x, f.z) < LIP_R - 0.3) f.lipPassed = false;
     // スピン減衰（かいてんが高いほど長持ち）
     f.spin -= Math.max(1.4, 7.6 - f.stats.st.spin * 0.55) * dt;
     const d = Math.hypot(f.x, f.z);
@@ -590,6 +748,14 @@ function stepBattle(dt){
             f.vz -= (1 + 0.55) * vr * nz;
             f.spin -= 1.0;                  // ヘリに当たった分だけ少し回転を失う
           }
+        } else if (!f.lipPassed){
+          // 強い勢いでヘリを越えそうになったら、踏みとどまりの猶予に入る。
+          // その間コマはヘリの上で止まり、タップ（CPUは確率）で踏みとどまれる
+          f.stagger = { t:0, vx:f.vx, vz:f.vz, startWall: nowS(),
+                        cpuHold: Math.random() < CPU_TAP_RATE };
+          f.x = nx * LIP_R; f.z = nz * LIP_R;
+          f.vx = 0; f.vz = 0;
+          clashMsg.textContent = (f === P) ? '踏みとどまれ！タップ！' : 'あいてが たたらを踏んだ！';
         }
       }
     }
@@ -598,8 +764,19 @@ function stepBattle(dt){
     }
   }
 
+  // テンションによる引き寄せ（相殺が続くほど接近が速くなり、タップが難しくなる）
+  if (tension > 0 && P.launched && C.launched && !P.out && !C.out && !P.stagger && !C.stagger){
+    const dx = C.x - P.x, dz = C.z - P.z;
+    const d = Math.hypot(dx, dz);
+    if (d > 0.01){
+      const a = TENSION_PULL * Math.min(tension, TENSION_CAP) * dt;
+      P.vx += (dx / d) * a; P.vz += (dz / d) * a;
+      C.vx -= (dx / d) * a; C.vz -= (dz / d) * a;
+    }
+  }
+
   // コマ同士の衝突
-  if (P.launched && C.launched && !P.out && !C.out){
+  if (P.launched && C.launched && !P.out && !C.out && !P.stagger && !C.stagger){
     const dx = C.x - P.x, dz = C.z - P.z;
     const dist = Math.hypot(dx, dz);
     const minDist = P.stats.radius + C.stats.radius;
@@ -622,8 +799,8 @@ function stepBattle(dt){
         const dmg = (atkF, defF) => Math.max(0.3,
           (1.0 + Math.max(-2, Math.min(8, atkF.stats.st.atk - defF.stats.st.def)) * 0.55
             + (atkF.stats.spike ? 2.2 : 0)) * impact);
-        C.spin -= dmg(P, C);
-        P.spin -= dmg(C, P);
+        // スピンダメージは即時適用せず、タップ判定（resolvePendingClash）に委ねる
+        registerClash(dmg(C, P), dmg(P, C));
       }
     }
   }
@@ -650,6 +827,10 @@ function syncFighters(dt, t){
     const tilt = (1 - spinNow / 100) * 0.30;
     f.mesh.rotation.x = Math.cos(t * 6.7 + f.phase) * tilt * 0.5;
     f.mesh.rotation.z = Math.sin(t * 8.0 + f.phase) * tilt * 0.5;
+    if (f.stagger){
+      // ヘリの上でたたらを踏む様子を小刻みな揺れで表す
+      f.mesh.rotation.z += Math.sin(t * 42 + f.phase) * 0.07;
+    }
   }
   spinBarP.style.width = Math.max(0, fighters.player.spin) + '%';
   spinBarC.style.width = Math.max(0, fighters.cpu.spin) + '%';
@@ -665,7 +846,7 @@ function releaseLaunch(){
   if (!charging) return;
   charging = false;
   if (phase !== 'ready' || !fighters) return;
-  launchFighter(fighters.player, -4.6, power);
+  launchFighter(fighters.player, PLAYER_PHI, power);
   phase = 'fight'; fightTime = 0; cpuTimer = 0.5;
   battleMsg.textContent = 'バトル中！';
   launchBtn.disabled = true;
@@ -673,6 +854,35 @@ function releaseLaunch(){
 }
 window.addEventListener('pointerup', releaseLaunch);
 window.addEventListener('pointercancel', releaseLaunch);
+
+/* --- 衝突タイミング用のタップ記録（バトル中、画面のどこでもよい） --- */
+window.addEventListener('pointerdown', () => {
+  if (screen === 'battle' && phase === 'fight') tapTimes.push(nowS());
+});
+
+/* --- タイミング円の表示更新 --- */
+function updateTimingUI(){
+  if (!fighters) { timingRing.style.opacity = '0'; return; }
+  const P = fighters.player, C = fighters.cpu;
+  const staggering = !!(P.stagger || C.stagger);
+  const active = phase === 'fight' && P.launched && C.launched && !P.out && !C.out;
+  timingRing.style.opacity = (active || staggering) ? '1' : '0';
+  if (active && !staggering){
+    // 円の大きさはコマ同士の距離に連動（平方根変換で接近の最終局面を読みやすく）
+    const dist = Math.hypot(C.x - P.x, C.z - P.z);
+    const k = Math.sqrt(Math.min(1, dist / 12));
+    timingRing.style.transform = `scale(${(0.26 + 0.74 * k).toFixed(3)})`;
+  }
+  timingRing.classList.toggle('alarm', staggering);
+  if (!staggering && feedbackUntil && nowS() > feedbackUntil){
+    feedbackUntil = 0;
+    clashMsg.textContent = '';
+    timingRing.classList.remove('good', 'draw', 'bad');
+  }
+  // 古いタップ記録の掃除
+  const cutoff = nowS() - 1;
+  while (tapTimes.length && tapTimes[0] < cutoff) tapTimes.shift();
+}
 launchBtn.addEventListener('contextmenu', e => e.preventDefault());
 
 /* --- バトルまわりのボタン --- */
@@ -751,6 +961,7 @@ function animate(){
     }
     if (phase === 'fight') stepBattle(dt);
     syncFighters(dt, t);
+    updateTimingUI();
     renderer.render(battleScene, battleCam);
   } else {
     if (previewTop) previewTop.userData.spinG.rotation.y += dt * 1.4;
