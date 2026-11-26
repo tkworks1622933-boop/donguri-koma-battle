@@ -27,9 +27,8 @@
   /* ---------- タイトル ---------- */
   #screen-title{ align-items:center; justify-content:center; text-align:center;
     background:radial-gradient(ellipse at center, rgba(255,246,225,0) 40%, rgba(84,50,16,.28) 100%); }
-  #screen-title h1{ font-size:clamp(34px,9vw,54px); margin:0 0 6px; letter-spacing:.04em;
+  #screen-title h1{ font-size:clamp(34px,9vw,54px); margin:0 0 28px; letter-spacing:.04em;
     color:#6e4520; text-shadow:0 2px 0 #fff3d6, 0 4px 14px rgba(110,69,32,.35); }
-  #screen-title p{ margin:0 0 34px; font-size:15px; color:#7a5a36; }
   .btn{
     font:inherit; font-weight:700; font-size:19px; color:#fff; background:var(--accent);
     border:none; border-radius:999px; padding:15px 40px; cursor:pointer;
@@ -117,7 +116,6 @@
 <!-- タイトル -->
 <div id="screen-title" class="screen active">
   <h1>どんぐり<br>コマバトル</h1>
-  <p>パーツを組んで、土俵で対決！</p>
   <button id="play-btn" class="btn">あそぶ</button>
 </div>
 
@@ -125,9 +123,9 @@
 <div id="screen-build" class="screen">
   <div id="build-preview-space"></div>
   <div id="build-panel">
-    <div class="group-label">軸（つまようじ）</div>
+    <div class="group-label">軸</div>
     <div class="chips" id="chips-axis"></div>
-    <div class="group-label">本体（どんぐり）</div>
+    <div class="group-label">本体</div>
     <div class="chips" id="chips-body"></div>
     <div class="group-label">オプション</div>
     <div class="chips" id="chips-option"></div>
@@ -146,7 +144,7 @@
   </div>
   <div id="power-wrap">
     <div id="timing-wrap"><div id="timing-ring"></div><div id="clash-msg"></div></div>
-    <div id="battle-msg">長押しでパワーをためて、はなして発射！</div>
+    <div id="battle-msg"></div>
     <div id="power-bar-wrap"><div id="power-fill"></div></div>
     <button id="launch-btn" class="btn">長押しでパワー</button>
   </div>
@@ -354,6 +352,8 @@ const DRAW_KB_TAN = 0.4;    // 相殺ノックバックに混ぜる時計回り�
 const FAIL_KB_RATE = 0.15;  // 失敗回数1回ごとにノックバックが増える割合
 const TENSION_PULL = 0.35;  // テンション1段階あたりの引き寄せ加速度
 const TENSION_CAP = 8;      // テンション効果の上限段階
+const OPENING_PULL = 1.5;   // 序盤ブースト：発射直後だけ働く追加の引き寄せ加速度（最大値）
+const OPENING_TIME = 5.0;   // 序盤ブーストが線形に減衰して消えるまでの秒数（初接触でも終了）
 const STAGGER_WINDOW = 0.25;// ヘリで踏みとどまるためのタップ猶予（秒）
 const STAGGER_SPIN_COST = 8;// 踏みとどまり成功時に失うスピン
 const PLAYER_PHI = -75 * Math.PI / 180;  // プレイヤーの発射位置（12時〜1時方向）
@@ -686,6 +686,7 @@ let phase = 'ready';      // ready | fight | done
 let charging = false, power = 0;
 let fightTime = 0, cpuTimer = -1;
 let tension = 0;            // 相殺で貯まるテンション（引き寄せの強さ）
+let firstClash = false;     // 初接触が済んだかどうか（序盤ブーストの終了条件）
 let tapTimes = [];          // プレイヤーのタップ時刻（performance.now系）
 let pendingClash = null;    // 判定待ちの衝突 { t, dmgToP, dmgToC }
 let feedbackUntil = 0;      // タイミング円の結果表示を消す時刻
@@ -725,13 +726,13 @@ function startBattle(){
   }
   fighters = { player: makeFighter(selection, 'player'), cpu: makeFighter(cpuBuild, 'cpu') };
   phase = 'ready'; charging = false; power = 0; fightTime = 0; cpuTimer = -1;
-  tension = 0; tapTimes = []; pendingClash = null; feedbackUntil = 0;
+  tension = 0; firstClash = false; tapTimes = []; pendingClash = null; feedbackUntil = 0;
   clashMsg.textContent = '';
   timingRing.classList.remove('good', 'draw', 'bad', 'alarm');
   timingRing.style.opacity = '0';
   powerFill.style.width = '0%';
   spinBarP.style.width = '100%'; spinBarC.style.width = '100%';
-  battleMsg.textContent = '長押しでパワーをためて、はなして発射！';
+  battleMsg.textContent = '';
   launchBtn.disabled = false;
 }
 
@@ -780,6 +781,7 @@ function showClash(kind, text){
 /* 衝突の物理（跳ね返り）は即時適用し、スピンダメージだけをここに預ける。
    タップの「後から±TAP_WINDOW」も拾えるよう、窓が閉じてから resolvePendingClash で確定する */
 function registerClash(dmgToP, dmgToC){
+  firstClash = true;   // 初接触したので序盤ブーストはここで終わる
   if (pendingClash){
     pendingClash.dmgToP += dmgToP;
     pendingClash.dmgToC += dmgToC;
@@ -997,6 +999,19 @@ function stepBattle(dt){
     }
   }
 
+  // 序盤ブースト：発射直後の数秒だけ、両者を引き寄せる追加の力をかけて初接触を早める。
+  // OPENING_TIME 秒かけて線形に減衰し、初接触した時点でも終了するため、
+  // 中盤以降の物理（すり鉢の引力・摩擦・周回力・テンション等の基本定数）には影響しない
+  if (!firstClash && fightTime < OPENING_TIME && P.launched && C.launched && !P.out && !C.out && !P.stagger && !C.stagger){
+    const dx = C.x - P.x, dz = C.z - P.z;
+    const d = Math.hypot(dx, dz);
+    if (d > 0.01){
+      const a = OPENING_PULL * (1 - fightTime / OPENING_TIME) * dt;
+      P.vx += (dx / d) * a; P.vz += (dz / d) * a;
+      C.vx -= (dx / d) * a; C.vz -= (dz / d) * a;
+    }
+  }
+
   // コマ同士の衝突
   if (P.launched && C.launched && !P.out && !C.out && !P.stagger && !C.stagger){
     const dx = C.x - P.x, dz = C.z - P.z;
@@ -1083,7 +1098,6 @@ function releaseLaunch(){
   launchFighter(fighters.player, PLAYER_PHI, power);
   launchFighter(fighters.cpu, CPU_PHI, 45 + Math.random() * 50);   // CPUも同時に発射（着地タイミングを揃える）
   phase = 'fight'; fightTime = 0; cpuTimer = -1;
-  battleMsg.textContent = 'バトル中！';
   launchBtn.disabled = true;
   powerFill.style.width = '0%';
 }
