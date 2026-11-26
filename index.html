@@ -131,6 +131,8 @@
     <div class="chips" id="chips-body"></div>
     <div class="group-label">オプション</div>
     <div class="chips" id="chips-option"></div>
+    <div class="group-label">難易度</div>
+    <div class="chips" id="chips-difficulty"></div>
     <div class="stats" id="stats"></div>
     <button id="battle-btn" class="btn">バトル開始</button>
   </div>
@@ -343,7 +345,9 @@ const LIP_SPEED = 3.2;      // ヘリを越えるのに必要な外向き（径�
 /* --- 衝突タイミング＆踏みとどまりの調整パラメータ --- */
 const TAP_WINDOW = 0.12;    // 衝突の前後この秒数以内のタップを成功とみなす
 const GAP_MAX = 8;          // タイミング円が最大サイズになるときの、ボディの縁同士の間隔
-const CPU_TAP_RATE = 0.5;   // CPUがタップ判定に成功する確率（将来の難易度設定の差し替え口）
+/* --- 難易度ごとのCPUジャスト成功率（組み立て画面の選択で CPU_TAP_RATE を差し替える） --- */
+const DIFFICULTY_RATES = { easy: 0.25, normal: 0.5, hard: 0.9 };
+let CPU_TAP_RATE = DIFFICULTY_RATES.normal;  // CPUがタップ判定（ジャスト／踏みとどまり）に成功する確率
 const CLASH_WIN_DMG = 1.6;  // タップの勝敗がついたとき、勝者が与えるダメージの倍率
 const KB_PUSH = 2.4;        // タップで負けた側への追加ノックバックの強さ
 const DRAW_KB_TAN = 0.4;    // 相殺ノックバックに混ぜる時計回り接線成分の割合（対ノックバック量）
@@ -641,6 +645,30 @@ function buildChips(containerId, defs, key){
 buildChips('chips-axis', AXES, 'axis');
 buildChips('chips-body', BODIES, 'body');
 buildChips('chips-option', OPTIONS, 'option');
+
+/* --- 難易度チップ（選択はセッション中保持され、CPU_TAP_RATEに即反映される） --- */
+const DIFFICULTIES = {
+  easy:   { name: 'イージー' },
+  normal: { name: 'ノーマル' },
+  hard:   { name: 'ハード' },
+};
+let difficulty = 'normal';   // デフォルトはノーマル
+function buildDifficultyChips(){
+  const wrap = document.getElementById('chips-difficulty');
+  for (const [value, def] of Object.entries(DIFFICULTIES)){
+    const btn = document.createElement('button');
+    btn.className = 'chip' + (difficulty === value ? ' sel' : '');
+    btn.textContent = def.name;
+    btn.addEventListener('click', () => {
+      difficulty = value;
+      CPU_TAP_RATE = DIFFICULTY_RATES[value];
+      for (const c of wrap.children) c.classList.remove('sel');
+      btn.classList.add('sel');
+    });
+    wrap.appendChild(btn);
+  }
+}
+buildDifficultyChips();
 refreshPreview();
 
 document.getElementById('play-btn').addEventListener('click', () => { ensureAudio(); showScreen('build'); });
