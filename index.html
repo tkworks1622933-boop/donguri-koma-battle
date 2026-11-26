@@ -80,6 +80,7 @@
   #launch-btn{ touch-action:none; user-select:none; -webkit-user-select:none; }
   #launch-btn:disabled{ opacity:.45; box-shadow:none; }
   #launch-btn.boosting{ background:#d23c1e; box-shadow:0 4px 0 #8e2412, 0 8px 18px rgba(110,69,32,.3); }
+  #launch-btn.boost-keep{ background:#e86a1e; box-shadow:0 4px 0 #a8561c, 0 8px 18px rgba(110,69,32,.3); }
   #battle-msg{ font-size:14px; font-weight:700; color:#6e4520; text-shadow:0 1px 0 rgba(255,250,238,.9);
     min-height:1.3em; }
 
@@ -369,7 +370,7 @@ const DRAW_KB_RATE = 0.25;  // 相殺1回ごとに相殺ノックバックが増
 const PACE_STEP = 0.10;     // 相殺1回ごとのペース倍率の上昇（+10%）
 const PACE_CAP = 2.0;       // ペース倍率の上限
 /* --- ブーストボタン（プレイヤー専用） --- */
-const BOOST_MULT = 1.5;     // ブースト中の速度倍率
+const BOOST_MULT = 2.0;     // ブースト中の速度倍率
 const BOOST_KEEP = 1.5;     // ボタンを離した後もブースト速度を維持する秒数
 const BOOST_FADE = 1.0;     // その後、通常速度へ戻るまでにかける秒数
 const BOOST_DMG = 2;        // ブースト中にジャストの勝敗がついたときのダメージ倍率
@@ -775,7 +776,10 @@ function startBattle(pBuild = selection){
   battleMsg.textContent = '';
   launchBtn.disabled = false;
   launchBtn.textContent = '長押しでパワー';
-  launchBtn.classList.remove('boosting');
+  launchBtn.classList.remove('boosting', 'boost-keep');
+  launchBtn.style.background = '';
+  launchBtn.style.boxShadow = '';
+  clearTrailPool();
 }
 
 /* 時計の文字盤上の位置（h時方向・半径r）の座標。
@@ -995,13 +999,16 @@ function stepBattle(dt){
     // 摩擦（旧0.5→0.22に弱めて、滑りが長続きするように）
     const fr = Math.exp(-0.22 * dt);
     f.vx *= fr; f.vz *= fr;
-    // スピンが残っている間は静止させない：進行方向を曲げて土俵を周回させる力＋最低速度の維持
-    if (f.spin > 3){
+    // 静止させない：進行方向を曲げて土俵を周回させる力＋最低速度の維持。
+    // 移動の挙動はスピン量に依存しない（スピン0＝瀕死でも今まで通り動き回る）。
+    // スピンが効くのは数値管理（ダメージ・減衰・瀕死判定）と
+    // 見た目のフラフラ（syncFighters 側）だけに限定する
+    {
       const spd = Math.hypot(f.vx, f.vz);
       if (spd > 0.05){
-        // 速度に垂直な向きの力（強さはスピン残量に比例）。両者とも時計回り
+        // 速度に垂直な向きの力（強さはスピン残量によらず一定）。両者とも時計回り
         const px = -f.vz / spd, pz = f.vx / spd;
-        const drive = 1.15 * (Math.max(0, f.spin) / 100) * spdScale;
+        const drive = 1.15 * spdScale;
         f.vx += px * f.orbit * drive * dt;
         f.vz += pz * f.orbit * drive * dt;
       }
@@ -1020,13 +1027,8 @@ function stepBattle(dt){
       const cap = 13 * spdScale;
       if (spd > cap){ f.vx *= cap / spd; f.vz *= cap / spd; }
     }
-    // フラつき：スピンが弱いほど速度にノイズ（あんていで軽減）
-    if (f.spin < 50){
-      const wob = (50 - Math.max(0, f.spin)) / 50;
-      const amp = wob * Math.max(0.3, 1.6 - f.stats.st.stab * 0.13);
-      f.vx += (Math.random() - 0.5) * amp * 7 * dt;
-      f.vz += (Math.random() - 0.5) * amp * 7 * dt;
-    }
+    // ※フラつきの速度ノイズは廃止した（軌道を乱していたため）。
+    //   フラフラは syncFighters でメッシュの表示位置・傾きだけに付けている
     f.x += f.vx * dt;
     f.z += f.vz * dt;
     // 縁のヘリ（常時ガードレール）：コマは決して場外に出ない。
@@ -1137,8 +1139,17 @@ function syncFighters(dt, t){
     if (!f.launched) continue;
     const d = Math.hypot(f.x, f.z);
     let y = bowlY(Math.min(d, ARENA_R + 0.6));
-    f.mesh.position.set(f.x, y, f.z);
     const spinNow = Math.max(0, f.spin);
+    // フラフラは見た目だけ：スピンが弱いほどメッシュの表示位置を小さく揺らす
+    // （物理位置 f.x/f.z には一切触れない。揺れの大きさは あんてい で軽減）
+    let jx = 0, jz = 0;
+    if (spinNow < 50){
+      const wob = (50 - spinNow) / 50;
+      const amp = wob * Math.max(0.3, 1.6 - f.stats.st.stab * 0.13) * 0.055;
+      jx = Math.sin(t * 13.7 + f.phase * 3.1) * amp;
+      jz = Math.cos(t * 11.3 + f.phase * 2.3) * amp;
+    }
+    f.mesh.position.set(f.x + jx, y, f.z + jz);
     f.mesh.userData.spinG.rotation.y += f.spinDir * (3 + spinNow * 0.45) * dt;
     const tilt = (1 - spinNow / 100) * 0.30;
     f.mesh.rotation.x = Math.cos(t * 6.7 + f.phase) * tilt * 0.5;
@@ -1223,6 +1234,82 @@ function releaseBoost(e){
 window.addEventListener('pointerup', releaseBoost);
 window.addEventListener('pointercancel', releaseBoost);
 
+/* --- ブースト中の残像（簡素版） ---
+   ブースト中のプレイヤーのコマのゴーストを薄く残すだけの軽い演出。
+   ゴーストはプール化し（組み立てが変わったら作り直す）、個別マテリアルの
+   opacity でフェードさせる。重いパーティクル類は使わない */
+const TRAIL_MAX = 12;          // 同時に残す残像の数
+const TRAIL_LIFE = 0.35;       // 残像が消えるまでの秒数
+const TRAIL_INTERVAL = 0.04;   // 残像を置く間隔（秒）
+const TRAIL_OPACITY = 0.30;    // 残像の最大の濃さ
+let trailGhosts = [];          // { obj, spinG, mat, life }
+let trailKey = '';
+let trailTimer = 0;
+
+function clearTrailPool(){
+  for (const g of trailGhosts){
+    battleScene.remove(g.obj);
+    g.obj.traverse(o => {
+      if (o.geometry) o.geometry.dispose();
+      if (o.material && o.material !== g.mat) o.material.dispose();
+    });
+    g.mat.dispose();
+  }
+  trailGhosts = [];
+  trailKey = '';
+}
+
+function ensureTrailPool(sel){
+  const key = JSON.stringify(sel);
+  if (key === trailKey && trailGhosts.length) return;
+  clearTrailPool();
+  trailKey = key;
+  for (let i = 0; i < TRAIL_MAX; i++){
+    const obj = buildTopMesh(sel, 'player');
+    const mat = new THREE.MeshBasicMaterial({ color: 0xff9a3c, transparent: true, opacity: 0, depthWrite: false });
+    obj.traverse(o => {
+      if (o.isMesh){
+        o.material.dispose();   // buildTopMesh が作ったマテリアルは使わないので破棄
+        o.material = mat;
+        o.castShadow = false;
+        o.receiveShadow = false;
+      }
+    });
+    obj.visible = false;
+    battleScene.add(obj);
+    trailGhosts.push({ obj, spinG: obj.userData.spinG, mat, life: 0 });
+  }
+}
+
+function updateTrail(dt){
+  const P = fighters && fighters.player;
+  const boosting = !demoMode && phase === 'fight' && P && P.launched && currentBoostMult() > 1;
+  if (boosting){
+    ensureTrailPool(P.sel);
+    trailTimer -= dt;
+    if (trailTimer <= 0){
+      trailTimer = TRAIL_INTERVAL;
+      const slot = trailGhosts.find(g => g.life <= 0) || trailGhosts[0];
+      if (slot){
+        // 本体の表示姿勢（位置・傾き・自転）をそのまま写す
+        slot.obj.position.copy(P.mesh.position);
+        slot.obj.rotation.copy(P.mesh.rotation);
+        if (slot.spinG && P.mesh.userData.spinG) slot.spinG.rotation.y = P.mesh.userData.spinG.rotation.y;
+        slot.life = TRAIL_LIFE;
+        slot.obj.visible = true;
+      }
+    }
+  } else {
+    trailTimer = 0;
+  }
+  for (const g of trailGhosts){
+    if (g.life <= 0) continue;
+    g.life -= dt;
+    if (g.life <= 0){ g.obj.visible = false; g.mat.opacity = 0; continue; }
+    g.mat.opacity = TRAIL_OPACITY * (g.life / TRAIL_LIFE);
+  }
+}
+
 /* --- 衝突タイミング用のタップ記録（バトル中、画面のどこでもよい） --- */
 window.addEventListener('pointerdown', e => {
   // ブーストボタン上のポインタ操作はジャスト判定のタップとして記録しない
@@ -1230,11 +1317,42 @@ window.addEventListener('pointerdown', e => {
   if (screen === 'battle' && phase === 'fight') tapTimes.push(nowS());
 });
 
+/* --- ブーストボタンの表示 ---
+   押下中＝赤（.boosting）、離した後の維持フェーズ＝橙（.boost-keep）、
+   減衰フェーズ＝残り倍率の割合で維持色から通常色へ徐々に戻す。
+   指を離した後も「まだリスク期間中」と読めるようにするための表示 */
+const BOOST_BTN_KEEP = new THREE.Color(0xe86a1e);   // 維持フェーズの色
+const BOOST_BTN_BASE = new THREE.Color(0xcf6f2a);   // 通常色（--accent と同じ）
+const _boostBtnCol = new THREE.Color();
+function updateBoostBtn(){
+  const m = (!demoMode && phase === 'fight') ? currentBoostMult() : 1;
+  launchBtn.classList.remove('boosting', 'boost-keep');
+  if (m <= 1){
+    launchBtn.style.background = '';
+    launchBtn.style.boxShadow = '';
+    return;
+  }
+  if (boostHeld){
+    launchBtn.classList.add('boosting');
+    launchBtn.style.background = '';
+    launchBtn.style.boxShadow = '';
+  } else if (nowS() - boostReleaseT < BOOST_KEEP){
+    launchBtn.classList.add('boost-keep');
+    launchBtn.style.background = '';
+    launchBtn.style.boxShadow = '';
+  } else {
+    // 減衰フェーズ：倍率が通常へ戻るにつれて色も通常色へ
+    const k = (m - 1) / (BOOST_MULT - 1);
+    _boostBtnCol.copy(BOOST_BTN_BASE).lerp(BOOST_BTN_KEEP, k);
+    launchBtn.style.background = '#' + _boostBtnCol.getHexString();
+    launchBtn.style.boxShadow = '';
+  }
+}
+
 /* --- タイミング円の表示更新 --- */
 function updateTimingUI(){
   if (!fighters) { timingRing.style.opacity = '0'; return; }
-  // ブーストが効いている間はボタンを赤くして状態を示す
-  launchBtn.classList.toggle('boosting', !demoMode && phase === 'fight' && currentBoostMult() > 1);
+  updateBoostBtn();
   const P = fighters.player, C = fighters.cpu;
   const active = phase === 'fight' && P.launched && C.launched;
   timingRing.style.opacity = active ? '1' : '0';
@@ -1392,6 +1510,7 @@ function animate(){
     if (phase === 'fight') stepBattle(bdt);
     syncFighters(bdt, t);
     updateFX(bdt);
+    updateTrail(bdt);
     updateTimingUI();
     // カメラ：フィット位置を基準に、シェイクの残り時間に応じてランダムにずらす
     battleCam.position.copy(battleCamBase);
