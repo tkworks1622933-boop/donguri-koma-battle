@@ -413,6 +413,173 @@ const battleCam = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
   });
 }
 
+/* ================= 衝突の演出 =================
+   火花パーティクル／衝撃波リング／画面シェイク／ヒットストップ／WebAudioの打撃音 */
+/* --- 火花パーティクル（プール管理、加算ブレンドで寿命とともに暗く消える） --- */
+const SPARK_MAX = 420;
+const sparkPos  = new Float32Array(SPARK_MAX * 3);
+const sparkCol  = new Float32Array(SPARK_MAX * 3);
+const sparkVel  = new Float32Array(SPARK_MAX * 3);
+const sparkBase = new Float32Array(SPARK_MAX * 3);   // 元の色（フェード計算用）
+const sparkLife = new Float32Array(SPARK_MAX);
+const sparkMaxLife = new Float32Array(SPARK_MAX);
+for (let i = 0; i < SPARK_MAX; i++) sparkPos[i * 3 + 1] = -999;
+const sparkGeo = new THREE.BufferGeometry();
+sparkGeo.setAttribute('position', new THREE.BufferAttribute(sparkPos, 3));
+sparkGeo.setAttribute('color', new THREE.BufferAttribute(sparkCol, 3));
+const sparkPoints = new THREE.Points(sparkGeo, new THREE.PointsMaterial({
+  size: 0.15, vertexColors: true, transparent: true,
+  blending: THREE.AdditiveBlending, depthWrite: false,
+}));
+sparkPoints.frustumCulled = false;
+battleScene.add(sparkPoints);
+let sparkCursor = 0;
+
+function spawnSparks(x, y, z, count, speed, just){
+  for (let n = 0; n < count; n++){
+    const i = sparkCursor; sparkCursor = (sparkCursor + 1) % SPARK_MAX;
+    const th = Math.random() * Math.PI * 2;
+    const sp = speed * (0.35 + Math.random() * 0.85);
+    sparkPos[i * 3] = x; sparkPos[i * 3 + 1] = y; sparkPos[i * 3 + 2] = z;
+    sparkVel[i * 3]     = Math.cos(th) * sp;
+    sparkVel[i * 3 + 1] = (0.25 + Math.random() * 0.9) * sp;   // 上向き成分を持たせる
+    sparkVel[i * 3 + 2] = Math.sin(th) * sp;
+    sparkMaxLife[i] = sparkLife[i] = 0.3 + Math.random() * 0.35;
+    // ジャスト時は明るい金色、通常は橙色の火花
+    const r = 1.0, g = just ? 0.88 : 0.62, b = just ? 0.45 : 0.18;
+    sparkBase[i * 3] = r; sparkBase[i * 3 + 1] = g; sparkBase[i * 3 + 2] = b;
+    sparkCol[i * 3] = r;  sparkCol[i * 3 + 1] = g;  sparkCol[i * 3 + 2] = b;
+  }
+}
+
+function updateSparks(dt){
+  for (let i = 0; i < SPARK_MAX; i++){
+    if (sparkLife[i] <= 0) continue;
+    sparkLife[i] -= dt;
+    if (sparkLife[i] <= 0){
+      sparkPos[i * 3 + 1] = -999;
+      sparkCol[i * 3] = sparkCol[i * 3 + 1] = sparkCol[i * 3 + 2] = 0;
+      continue;
+    }
+    sparkVel[i * 3 + 1] -= 7.5 * dt;   // 重力
+    sparkPos[i * 3]     += sparkVel[i * 3] * dt;
+    sparkPos[i * 3 + 1] += sparkVel[i * 3 + 1] * dt;
+    sparkPos[i * 3 + 2] += sparkVel[i * 3 + 2] * dt;
+    const k = sparkLife[i] / sparkMaxLife[i];
+    sparkCol[i * 3]     = sparkBase[i * 3] * k;
+    sparkCol[i * 3 + 1] = sparkBase[i * 3 + 1] * k;
+    sparkCol[i * 3 + 2] = sparkBase[i * 3 + 2] * k;
+  }
+  sparkGeo.attributes.position.needsUpdate = true;
+  sparkGeo.attributes.color.needsUpdate = true;
+}
+
+/* --- 衝撃波リング（土俵表面に沿って広がる波紋） --- */
+const ringPool = [];
+for (let i = 0; i < 6; i++){
+  const m = new THREE.Mesh(
+    new THREE.RingGeometry(0.86, 1.0, 48),
+    new THREE.MeshBasicMaterial({ color: 0xffe2a0, transparent: true, opacity: 0,
+      side: THREE.DoubleSide, depthWrite: false }));
+  m.rotation.x = -Math.PI / 2;
+  m.visible = false;
+  battleScene.add(m);
+  ringPool.push({ mesh: m, t: 0, dur: 0.4, maxR: 2, active: false });
+}
+function spawnRing(x, z, strength, just){
+  const r = ringPool.find(r => !r.active) || ringPool[0];
+  const d = Math.hypot(x, z);
+  r.mesh.position.set(x, bowlY(Math.min(d, ARENA_R)) + 0.07, z);
+  r.mesh.material.color.setHex(just ? 0xffd34d : 0xffe2a0);
+  r.t = 0; r.active = true; r.mesh.visible = true;
+  r.dur = 0.34 + strength * 0.16;
+  r.maxR = 1.5 + strength * 2.3 + (just ? 0.9 : 0);
+}
+function updateRings(dt){
+  for (const r of ringPool){
+    if (!r.active) continue;
+    r.t += dt;
+    const k = r.t / r.dur;
+    if (k >= 1){ r.active = false; r.mesh.visible = false; continue; }
+    const s = 0.25 + (r.maxR - 0.25) * (1 - (1 - k) * (1 - k));  // 最初速く、広がりながら減速
+    r.mesh.scale.set(s, s, s);
+    r.mesh.material.opacity = 0.8 * (1 - k);
+  }
+}
+
+/* --- 画面シェイクとヒットストップ --- */
+let shakeAmp = 0, shakeT = 0, shakeDur = 0.2;
+function addShake(amp, dur){
+  if (shakeT <= 0 || amp >= shakeAmp) shakeAmp = amp;
+  shakeT = shakeDur = Math.max(shakeT, dur);
+}
+let hitstop = 0;   // 残り秒（実時間）。この間バトルの時間経過をほぼ止める
+function addHitstop(sec){ hitstop = Math.max(hitstop, sec); }
+
+/* --- 効果音（WebAudioで合成。ユーザー操作を起点に開始する） --- */
+let audioCtx = null, noiseBuf = null;
+function ensureAudio(){
+  if (!audioCtx){
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audioCtx = new AC();
+    noiseBuf = audioCtx.createBuffer(1, Math.floor(audioCtx.sampleRate * 0.1), audioCtx.sampleRate);
+    const ch = noiseBuf.getChannelData(0);
+    for (let i = 0; i < ch.length; i++) ch[i] = Math.random() * 2 - 1;
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+function playHit(strength, just){
+  if (!audioCtx || audioCtx.state !== 'running') return;
+  const t = audioCtx.currentTime;
+  const vol = Math.min(0.9, 0.22 + strength * 0.55) * (just ? 1.15 : 1);
+  // 芯の打撃音：サイン波が低く落ちる
+  const osc = audioCtx.createOscillator(), og = audioCtx.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(just ? 300 : 190, t);
+  osc.frequency.exponentialRampToValueAtTime(55, t + 0.1);
+  og.gain.setValueAtTime(vol, t);
+  og.gain.exponentialRampToValueAtTime(0.001, t + 0.13);
+  osc.connect(og); og.connect(audioCtx.destination);
+  osc.start(t); osc.stop(t + 0.14);
+  // 金属的なアタック：バンドパスを通したノイズバースト
+  const src = audioCtx.createBufferSource(); src.buffer = noiseBuf;
+  const bp = audioCtx.createBiquadFilter();
+  bp.type = 'bandpass'; bp.frequency.value = just ? 2800 : 1700; bp.Q.value = 0.7;
+  const ng = audioCtx.createGain();
+  ng.gain.setValueAtTime(vol * 0.8, t);
+  ng.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
+  src.connect(bp); bp.connect(ng); ng.connect(audioCtx.destination);
+  src.start(t); src.stop(t + 0.09);
+  if (just){
+    // ジャスト時は明るい上音を重ねる
+    const o2 = audioCtx.createOscillator(), g2 = audioCtx.createGain();
+    o2.type = 'triangle';
+    o2.frequency.setValueAtTime(740, t);
+    o2.frequency.exponentialRampToValueAtTime(1180, t + 0.08);
+    g2.gain.setValueAtTime(vol * 0.35, t);
+    g2.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+    o2.connect(g2); g2.connect(audioCtx.destination);
+    o2.start(t); o2.stop(t + 0.13);
+  }
+}
+
+/* --- 衝突演出のまとめ役：接触点で一式を発火する --- */
+function triggerClashFX(x, z, strength, just){
+  const d = Math.hypot(x, z);
+  const y = bowlY(Math.min(d, ARENA_R)) + 0.7;
+  spawnSparks(x, y, z,
+    Math.round((10 + strength * 26) * (just ? 1.7 : 1)),
+    2.2 + strength * 3.8, just);
+  spawnRing(x, z, strength, just);
+  addShake(0.03 + strength * 0.15 + (just ? 0.09 : 0), 0.15 + strength * 0.09);
+  playHit(strength, just);
+}
+function updateFX(dt){
+  updateSparks(dt);
+  updateRings(dt);
+}
+
 /* ================= 画面遷移 ================= */
 let screen = 'title';   // title | build | battle （結果はバトル画面の上に重ねる）
 function showScreen(name){
@@ -475,7 +642,7 @@ buildChips('chips-body', BODIES, 'body');
 buildChips('chips-option', OPTIONS, 'option');
 refreshPreview();
 
-document.getElementById('play-btn').addEventListener('click', () => showScreen('build'));
+document.getElementById('play-btn').addEventListener('click', () => { ensureAudio(); showScreen('build'); });
 
 /* ================= バトル ================= */
 const launchBtn  = document.getElementById('launch-btn');
@@ -619,16 +786,22 @@ function resolvePendingClash(){
       P.vx -= (dx / d) * kb; P.vz -= (dz / d) * kb;
       C.vx += (dx / d) * kb; C.vz += (dz / d) * kb;
     }
+    triggerClashFX((P.x + C.x) / 2, (P.z + C.z) / 2, 0.55, true);
+    addHitstop(0.06);
     showClash('draw', '相殺！');
   } else if (pOK){
     C.fails++;
     C.spin -= pc.dmgToC * CLASH_WIN_DMG;
     pushLoser(C, P);
-    showClash('good', '成功！');
+    triggerClashFX(C.x, C.z, 0.85, true);
+    addHitstop(0.08);
+    showClash('good', 'ジャスト！');
   } else if (cOK){
     P.fails++;
     P.spin -= pc.dmgToP * CLASH_WIN_DMG;
     pushLoser(P, C);
+    triggerClashFX(P.x, P.z, 0.85, true);
+    addHitstop(0.08);
     showClash('bad', '失敗…');
   } else {
     P.fails++; C.fails++;
@@ -804,7 +977,18 @@ function stepBattle(dt){
         const jimp = -(1 + 0.9) * rvn / invSum;
         P.vx -= jimp * invP * nx; P.vz -= jimp * invP * nz;
         C.vx += jimp * invC * nx; C.vz += jimp * invC * nz;
+        // ノックバック強化：衝突の強さに比例した追加の押し出しで、
+        // ぶつかったコマ同士が目に見えて弾き合って離れるようにする。
+        // 追加する相対分離速度は push 本体（弱い接触で約0.9、強い衝突で約4.1）で、
+        // 質量の逆数比で両者へ配分する。土俵の物理定数には触れない
+        const strength = Math.min(1, Math.abs(rvn) / 9);
+        const push = 0.5 + 3.6 * strength;
+        P.vx -= nx * push * (invP / invSum); P.vz -= nz * push * (invP / invSum);
+        C.vx += nx * push * (invC / invSum); C.vz += nz * push * (invC / invSum);
         const impact = 0.6 + Math.min(1.4, Math.abs(rvn) * 0.12);
+        // 接触点で演出（火花・衝撃波・シェイク・効果音）。強い衝突ではヒットストップも
+        triggerClashFX(P.x + nx * P.stats.radius, P.z + nz * P.stats.radius, strength, false);
+        if (strength > 0.5) addHitstop(0.06);
         const dmg = (atkF, defF) => Math.max(0.3,
           (1.0 + Math.max(-2, Math.min(8, atkF.stats.st.atk - defF.stats.st.def)) * 0.55
             + (atkF.stats.spike ? 2.2 : 0)) * impact);
@@ -848,6 +1032,7 @@ function syncFighters(dt, t){
 /* --- 発射操作（長押し） --- */
 launchBtn.addEventListener('pointerdown', e => {
   e.preventDefault();
+  ensureAudio();
   if (phase !== 'ready') return;
   charging = true; power = 0;
 });
@@ -899,6 +1084,7 @@ launchBtn.addEventListener('contextmenu', e => e.preventDefault());
 
 /* --- バトルまわりのボタン --- */
 document.getElementById('battle-btn').addEventListener('click', () => {
+  ensureAudio();
   cpuBuild = randomBuild();
   startBattle();
   showScreen('battle');
@@ -917,6 +1103,7 @@ document.getElementById('rebuild-btn').addEventListener('click', () => {
    土俵の外周（縁・リム・ヘリを含む）上の点がすべて画面内（NDCで±0.96以内）に
    収まる距離を二分探索で求める。横幅が制約になる縦持ちでも左右が見切れない。 */
 const battleDir = new THREE.Vector3(0, 11, 8.8).normalize();
+const battleCamBase = new THREE.Vector3(0, 20, 16);   // フィットで決まったカメラ位置（シェイクの基準）
 const fitPoints = [];
 for (let i = 0; i < 24; i++){
   const a = (i / 24) * Math.PI * 2, ca = Math.cos(a), sa = Math.sin(a);
@@ -944,6 +1131,7 @@ function fitBattleCamera(){
     if (battleFits(mid)) hi = mid; else lo = mid;
   }
   battleFits(hi);   // 最終位置をカメラに反映
+  battleCamBase.copy(battleCam.position);
 }
 
 function onResize(){
@@ -971,9 +1159,23 @@ function animate(){
       power = Math.min(100, power + dt * 95);
       powerFill.style.width = power + '%';
     }
-    if (phase === 'fight') stepBattle(dt);
-    syncFighters(dt, t);
+    // ヒットストップ：短時間だけバトル全体の時間経過をほぼ止める
+    let bdt = dt;
+    if (hitstop > 0){ hitstop -= dt; bdt = dt * 0.06; }
+    if (phase === 'fight') stepBattle(bdt);
+    syncFighters(bdt, t);
+    updateFX(bdt);
     updateTimingUI();
+    // カメラ：フィット位置を基準に、シェイクの残り時間に応じてランダムにずらす
+    battleCam.position.copy(battleCamBase);
+    if (shakeT > 0){
+      shakeT -= dt;
+      const k = Math.max(0, shakeT / shakeDur) * shakeAmp;
+      battleCam.position.x += (Math.random() * 2 - 1) * k;
+      battleCam.position.y += (Math.random() * 2 - 1) * k * 0.6;
+      battleCam.position.z += (Math.random() * 2 - 1) * k;
+    }
+    battleCam.lookAt(0, 0, 0);
     renderer.render(battleScene, battleCam);
   } else {
     if (previewTop) previewTop.userData.spinG.rotation.y += dt * 1.4;
