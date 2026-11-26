@@ -342,6 +342,7 @@ const LIP_R = 5.9;          // 縁のヘリの位置（中心からの距離）
 const LIP_SPEED = 3.2;      // ヘリを越えるのに必要な外向き（径方向）の速度
 /* --- 衝突タイミング＆踏みとどまりの調整パラメータ --- */
 const TAP_WINDOW = 0.12;    // 衝突の前後この秒数以内のタップを成功とみなす
+const GAP_MAX = 8;          // タイミング円が最大サイズになるときの、ボディの縁同士の間隔
 const CPU_TAP_RATE = 0.5;   // CPUがタップ判定に成功する確率（将来の難易度設定の差し替え口）
 const CLASH_WIN_DMG = 1.6;  // タップの勝敗がついたとき、勝者が与えるダメージの倍率
 const KB_PUSH = 2.4;        // タップで負けた側への追加ノックバックの強さ
@@ -608,8 +609,16 @@ function resolvePendingClash(){
     loser.vz += (dz / d) * kb;
   };
   if (pOK && cOK){
-    // 相殺：両者ノーダメージ。代わりにテンションが貯まって引き寄せが強くなる
+    // 相殺：両者ノーダメージ。まず互いに跳ね返り（ノックバック）、
+    // その後テンションの引き寄せで再接近する流れにする
     tension++;
+    const dx = C.x - P.x, dz = C.z - P.z;
+    const d = Math.hypot(dx, dz);
+    if (d > 0.01){
+      const kb = KB_PUSH * 0.85;   // 敗者への追加ノックバックより少し弱く、両者へ均等に
+      P.vx -= (dx / d) * kb; P.vz -= (dz / d) * kb;
+      C.vx += (dx / d) * kb; C.vz += (dz / d) * kb;
+    }
     showClash('draw', '相殺！');
   } else if (pOK){
     C.fails++;
@@ -868,10 +877,13 @@ function updateTimingUI(){
   const active = phase === 'fight' && P.launched && C.launched && !P.out && !C.out;
   timingRing.style.opacity = (active || staggering) ? '1' : '0';
   if (active && !staggering){
-    // 円の大きさはコマ同士の距離に連動（平方根変換で接近の最終局面を読みやすく）
+    // 円の大きさはボディの縁同士の間隔（gap）に連動し、gap=0（接触）で点になる。
+    // 2次曲線なので、遠いときは1単位あたり大きく縮み、近いときは縮みが緩やかに
+    // なって、ドットになる最後の瞬間が読みやすくなる
     const dist = Math.hypot(C.x - P.x, C.z - P.z);
-    const k = Math.sqrt(Math.min(1, dist / 12));
-    timingRing.style.transform = `scale(${(0.26 + 0.74 * k).toFixed(3)})`;
+    const gap = Math.max(0, dist - (P.stats.radius + C.stats.radius));
+    const k = Math.min(1, gap / GAP_MAX);
+    timingRing.style.transform = `scale(${(k * k).toFixed(3)})`;
   }
   timingRing.classList.toggle('alarm', staggering);
   if (!staggering && feedbackUntil && nowS() > feedbackUntil){
