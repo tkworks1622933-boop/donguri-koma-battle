@@ -690,16 +690,47 @@ document.getElementById('rebuild-btn').addEventListener('click', () => {
 });
 
 /* ================= リサイズとメインループ ================= */
+/* バトルカメラのフィット計算：
+   視点の向き（斜め見下ろし）は今まで通り (0, 11, 8.8) 方向に固定し、
+   土俵の外周（縁・リム・ヘリを含む）上の点がすべて画面内（NDCで±0.96以内）に
+   収まる距離を二分探索で求める。横幅が制約になる縦持ちでも左右が見切れない。 */
+const battleDir = new THREE.Vector3(0, 11, 8.8).normalize();
+const fitPoints = [];
+for (let i = 0; i < 24; i++){
+  const a = (i / 24) * Math.PI * 2, ca = Math.cos(a), sa = Math.sin(a);
+  fitPoints.push(new THREE.Vector3(6.60 * ca, 1.30, 6.60 * sa));  // すり鉢の外周
+  fitPoints.push(new THREE.Vector3(6.48 * ca, 1.51, 6.48 * sa));  // リムの外周・上端
+}
+fitPoints.push(new THREE.Vector3(0, 1.51, 0));
+const _fitV = new THREE.Vector3();
+function battleFits(d){
+  battleCam.position.copy(battleDir).multiplyScalar(d);
+  battleCam.lookAt(0, 0, 0);
+  battleCam.updateMatrixWorld();
+  for (const p of fitPoints){
+    _fitV.copy(p).project(battleCam);
+    if (Math.abs(_fitV.x) > 0.96 || Math.abs(_fitV.y) > 0.96 || _fitV.z > 1) return false;
+  }
+  return true;
+}
+function fitBattleCamera(){
+  battleCam.updateProjectionMatrix();
+  let lo = 6, hi = 90;
+  while (!battleFits(hi) && hi < 400) hi *= 1.5;   // 収まる上限の確保（通常は不要）
+  for (let i = 0; i < 28; i++){
+    const mid = (lo + hi) / 2;
+    if (battleFits(mid)) hi = mid; else lo = mid;
+  }
+  battleFits(hi);   // 最終位置をカメラに反映
+}
+
 function onResize(){
   const w = window.innerWidth, h = window.innerHeight;
   renderer.setSize(w, h);
   previewCam.aspect = w / h;
   previewCam.updateProjectionMatrix();
   battleCam.aspect = w / h;
-  const s = (w / h) < 1 ? 1.32 : 1.0;   // 縦持ちでは少し引く
-  battleCam.position.set(0, 11 * s, 8.8 * s);
-  battleCam.lookAt(0, 0, 0);
-  battleCam.updateProjectionMatrix();
+  fitBattleCamera();
 }
 window.addEventListener('resize', onResize);
 onResize();
