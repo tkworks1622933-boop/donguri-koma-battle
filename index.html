@@ -37,6 +37,7 @@
   .btn:active{ transform:translateY(3px); box-shadow:0 1px 0 var(--accent-dark); }
   .btn.sub{ background:#fffdf6; color:var(--ink); border:2px solid var(--accent);
     box-shadow:0 4px 0 #d8c49a; font-size:16px; padding:12px 26px; }
+  #screen-title .btn.sub{ margin-top:14px; }
 
   /* ---------- 組み立て ---------- */
   #build-preview-space{ flex:1 1 auto; min-height:0; }
@@ -115,6 +116,7 @@
 <div id="screen-title" class="screen active">
   <h1>どんぐり<br>コマバトル</h1>
   <button id="play-btn" class="btn">あそぶ</button>
+  <button id="demo-btn" class="btn sub">デモ対戦</button>
 </div>
 
 <!-- 組み立て -->
@@ -137,14 +139,15 @@
 <!-- バトル -->
 <div id="screen-battle" class="screen">
   <div id="hud">
-    <div class="hud-row"><span class="hname">あなた</span><div class="bar"><div class="fill" id="spin-player"></div></div></div>
-    <div class="hud-row"><span class="hname">CPU</span><div class="bar"><div class="fill" id="spin-cpu"></div></div></div>
+    <div class="hud-row"><span class="hname" id="name-player">あなた</span><div class="bar"><div class="fill" id="spin-player"></div></div></div>
+    <div class="hud-row"><span class="hname" id="name-cpu">CPU</span><div class="bar"><div class="fill" id="spin-cpu"></div></div></div>
   </div>
   <div id="power-wrap">
     <div id="timing-wrap"><div id="timing-ring"></div><div id="clash-msg"></div></div>
     <div id="battle-msg"></div>
     <div id="power-bar-wrap"><div id="power-fill"></div></div>
     <button id="launch-btn" class="btn">長押しでパワー</button>
+    <button id="demo-exit-btn" class="btn sub" style="display:none">タイトルへ</button>
   </div>
 </div>
 
@@ -153,7 +156,7 @@
   <div id="result-card">
     <p id="result-title">勝ち！</p>
     <p id="result-reason"></p>
-    <div class="btns">
+    <div class="btns" id="result-btns">
       <button id="rematch-btn" class="btn">もう一度</button>
       <button id="rebuild-btn" class="btn sub">組み立てに戻る</button>
     </div>
@@ -346,6 +349,7 @@ const REVIVE_SPIN = 15;     // 瀕死のコマがジャスト成功で復活し�
 /* --- 難易度ごとのCPUジャスト成功率（組み立て画面の選択で CPU_TAP_RATE を差し替える） --- */
 const DIFFICULTY_RATES = { easy: 0.25, normal: 0.5, hard: 0.9 };
 let CPU_TAP_RATE = DIFFICULTY_RATES.normal;  // CPUがタップ判定（ジャスト）に成功する確率
+const DEMO_JUST_RATE = 0.5;  // デモ対戦で両コマのジャスト成否を決める確率（難易度は適用しない）
 const CLASH_WIN_DMG = 1.6;  // タップの勝敗がついたとき、勝者が与えるダメージの倍率
 const KB_PUSH = 2.4;        // タップで負けた側への追加ノックバックの強さ
 const DRAW_KB_TAN = 0.4;    // 相殺ノックバックに混ぜる時計回り接線成分の割合（対ノックバック量）
@@ -683,8 +687,16 @@ const powerFill  = document.getElementById('power-fill');
 const battleMsg  = document.getElementById('battle-msg');
 const spinBarP   = document.getElementById('spin-player');
 const spinBarC   = document.getElementById('spin-cpu');
+const nameP      = document.getElementById('name-player');
+const nameC      = document.getElementById('name-cpu');
+const powerBarWrap = document.getElementById('power-bar-wrap');
+const demoExitBtn  = document.getElementById('demo-exit-btn');
+const resultBtns   = document.getElementById('result-btns');
+const resultScreen = document.getElementById('screen-result');
 
 let fighters = null;      // { player, cpu }
+let demoMode = false;     // デモ対戦（CPU同士の自動対戦）かどうか
+let demoTimer = null;     // デモ対戦の自動発射／次の対戦への移行タイマー
 let cpuBuild = null;
 let phase = 'ready';      // ready | fight | done
 let charging = false, power = 0;
@@ -722,14 +734,14 @@ function makeFighter(sel, side){
   };
 }
 
-function startBattle(){
+function startBattle(pBuild = selection){
   if (fighters){
     for (const f of [fighters.player, fighters.cpu]){
       battleScene.remove(f.mesh);
       disposeTop(f.mesh);
     }
   }
-  fighters = { player: makeFighter(selection, 'player'), cpu: makeFighter(cpuBuild, 'cpu') };
+  fighters = { player: makeFighter(pBuild, 'player'), cpu: makeFighter(cpuBuild, 'cpu') };
   phase = 'ready'; charging = false; power = 0; fightTime = 0; cpuTimer = -1;
   tension = 0; firstClash = false; tapTimes = []; pendingClash = null; feedbackUntil = 0;
   dyingCounter = 0;
@@ -770,15 +782,27 @@ function launchFighter(f, startHour, targetHour, powerVal){
 function endBattle(win, reason){
   if (phase === 'done') return;
   phase = 'done';
-  const reasons = {
-    win:  { finish:'とどめの一撃！', time:'回転のこりで 勝ち！' },
-    lose: { finish:'とどめを 刺されてしまった', time:'回転のこりで 負け…' },
-  };
-  document.getElementById('result-title').textContent = win ? '勝ち！' : '負け…';
-  document.getElementById('result-reason').textContent = reasons[win ? 'win' : 'lose'][reason];
+  const titleEl = document.getElementById('result-title');
+  const reasonEl = document.getElementById('result-reason');
+  if (demoMode){
+    // デモ対戦では勝った側のCPU名で結果を表示する
+    titleEl.textContent = win ? 'CPU1 の勝ち！' : 'CPU2 の勝ち！';
+    reasonEl.textContent = reason === 'finish' ? 'とどめの一撃！' : '回転のこりで決着';
+  } else {
+    const reasons = {
+      win:  { finish:'とどめの一撃！', time:'回転のこりで 勝ち！' },
+      lose: { finish:'とどめを 刺されてしまった', time:'回転のこりで 負け…' },
+    };
+    titleEl.textContent = win ? '勝ち！' : '負け…';
+    reasonEl.textContent = reasons[win ? 'win' : 'lose'][reason];
+  }
   setTimeout(() => {
     if (screen === 'battle'){
       document.getElementById('screen-result').classList.add('active');
+      if (demoMode){
+        // 結果を約3秒表示してから、次のデモ対戦を自動で始める
+        demoTimer = setTimeout(startNextDemo, 3000);
+      }
     }
   }, 700);
 }
@@ -826,8 +850,11 @@ function resolvePendingClash(){
   const pc = pendingClash;
   pendingClash = null;
   const P = fighters.player, C = fighters.cpu;
-  const pOK = tapTimes.some(t => Math.abs(t - pc.t) <= TAP_WINDOW);
-  const cOK = Math.random() < CPU_TAP_RATE;
+  // デモ対戦では両者ともタップの代わりに確率でジャスト成否を決める（難易度は適用しない）。
+  // 瀕死時の復活ジャストも、この pOK / cOK をそのまま使う
+  const pOK = demoMode ? Math.random() < DEMO_JUST_RATE
+                       : tapTimes.some(t => Math.abs(t - pc.t) <= TAP_WINDOW);
+  const cOK = Math.random() < (demoMode ? DEMO_JUST_RATE : CPU_TAP_RATE);
   // 瀕死のコマが関わる衝突は、通常の結果適用より先に決着／復活を判定する。
   // 瀕死側がジャストできれば復活して、この衝突は通常どおり解決する。
   // 瀕死側がジャストできなければ、その場で決着する
@@ -1076,15 +1103,19 @@ launchBtn.addEventListener('pointerdown', e => {
   if (phase !== 'ready') return;
   charging = true; power = 0;
 });
+/* 両コマを同時に発射してバトルを開始する（通常モード・デモ対戦で共用） */
+function launchBoth(pPower, cPower){
+  launchFighter(fighters.player, PLAYER_START_HOUR, PLAYER_TARGET_HOUR, pPower);
+  launchFighter(fighters.cpu, CPU_START_HOUR, CPU_TARGET_HOUR, cPower);
+  phase = 'fight'; fightTime = 0; cpuTimer = -1;
+  launchBtn.disabled = true;
+  powerFill.style.width = '0%';
+}
 function releaseLaunch(){
   if (!charging) return;
   charging = false;
   if (phase !== 'ready' || !fighters) return;
-  launchFighter(fighters.player, PLAYER_START_HOUR, PLAYER_TARGET_HOUR, power);
-  launchFighter(fighters.cpu, CPU_START_HOUR, CPU_TARGET_HOUR, 45 + Math.random() * 50);   // CPUも同時に発射（着地タイミングを揃える）
-  phase = 'fight'; fightTime = 0; cpuTimer = -1;
-  launchBtn.disabled = true;
-  powerFill.style.width = '0%';
+  launchBoth(power, 45 + Math.random() * 50);   // CPUも同時に発射（着地タイミングを揃える）
 }
 window.addEventListener('pointerup', releaseLaunch);
 window.addEventListener('pointercancel', releaseLaunch);
@@ -1120,6 +1151,56 @@ function updateTimingUI(){
   while (tapTimes.length && tapTimes[0] < cutoff) tapTimes.shift();
 }
 launchBtn.addEventListener('contextmenu', e => e.preventDefault());
+
+/* ================= デモ対戦（CPU同士の自動対戦） =================
+   組み立ては両者ともランダム、発射は自動、ジャスト判定は DEMO_JUST_RATE の確率。
+   バトルの物理・ルール（衝突・相殺・テンション・瀕死と決着・制限時間）は
+   通常モードと完全に同じコードを通し、入力（発射とジャスト）だけを差し替える */
+function startDemo(){
+  demoMode = true;
+  clearTimeout(demoTimer);
+  nameP.textContent = 'CPU1';   // 茶色側（player枠）
+  nameC.textContent = 'CPU2';   // 緑側（cpu枠）
+  launchBtn.style.display = 'none';
+  powerBarWrap.style.display = 'none';
+  demoExitBtn.style.display = '';
+  resultBtns.style.display = 'none';
+  // 結果表示中でも「タイトルへ」に触れるよう、デモ中は結果オーバーレイをクリック透過にする
+  resultScreen.style.pointerEvents = 'none';
+  cpuBuild = randomBuild();
+  startBattle(randomBuild());
+  showScreen('battle');
+  scheduleDemoLaunch();
+}
+function scheduleDemoLaunch(){
+  clearTimeout(demoTimer);
+  // 短い溜め（1秒弱）の後、両者同時に発射。パワーは両者ともランダム（45〜95）
+  demoTimer = setTimeout(() => {
+    if (!demoMode || screen !== 'battle' || phase !== 'ready' || !fighters) return;
+    launchBoth(45 + Math.random() * 50, 45 + Math.random() * 50);
+  }, 900);
+}
+function startNextDemo(){
+  if (!demoMode) return;
+  resultScreen.classList.remove('active');
+  cpuBuild = randomBuild();
+  startBattle(randomBuild());
+  scheduleDemoLaunch();
+}
+function stopDemo(){
+  demoMode = false;
+  clearTimeout(demoTimer);
+  nameP.textContent = 'あなた';
+  nameC.textContent = 'CPU';
+  launchBtn.style.display = '';
+  powerBarWrap.style.display = '';
+  demoExitBtn.style.display = 'none';
+  resultBtns.style.display = '';
+  resultScreen.style.pointerEvents = '';
+  showScreen('title');
+}
+document.getElementById('demo-btn').addEventListener('click', () => { ensureAudio(); startDemo(); });
+demoExitBtn.addEventListener('click', stopDemo);
 
 /* --- バトルまわりのボタン --- */
 document.getElementById('battle-btn').addEventListener('click', () => {
