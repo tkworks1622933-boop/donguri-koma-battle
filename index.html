@@ -346,6 +346,7 @@ const GAP_MAX = 8;          // タイミング円が最大サイズになると�
 const CPU_TAP_RATE = 0.5;   // CPUがタップ判定に成功する確率（将来の難易度設定の差し替え口）
 const CLASH_WIN_DMG = 1.6;  // タップの勝敗がついたとき、勝者が与えるダメージの倍率
 const KB_PUSH = 2.4;        // タップで負けた側への追加ノックバックの強さ
+const DRAW_KB_TAN = 0.4;    // 相殺ノックバックに混ぜる時計回り接線成分の割合（対ノックバック量）
 const FAIL_KB_RATE = 0.15;  // 失敗回数1回ごとにノックバックが増える割合
 const TENSION_PULL = 0.35;  // テンション1段階あたりの引き寄せ加速度
 const TENSION_CAP = 8;      // テンション効果の上限段階
@@ -783,8 +784,19 @@ function resolvePendingClash(){
     const d = Math.hypot(dx, dz);
     if (d > 0.01){
       const kb = KB_PUSH * 0.85;   // 敗者への追加ノックバックより少し弱く、両者へ均等に
-      P.vx -= (dx / d) * kb; P.vz -= (dz / d) * kb;
-      C.vx += (dx / d) * kb; C.vz += (dz / d) * kb;
+      // 法線方向の跳ね返りに、各コマの現在位置における時計回りの接線成分を少し混ぜる。
+      // 接線は周回力と同じ定義（位置ベクトルを90°回した向き × orbit）を使い、
+      // 跳ね返った後も真っ直ぐ離れず、周回の流れを保ったまま離れるようにする
+      const nx = dx / d, nz = dz / d;
+      const pushWithTan = (f, dir) => {
+        const r = Math.hypot(f.x, f.z);
+        let tx = f.orbit, tz = 0;   // 中心付近では接線が定まらないので既定値
+        if (r > 0.3){ tx = (-f.z / r) * f.orbit; tz = (f.x / r) * f.orbit; }
+        f.vx += nx * dir * kb + tx * kb * DRAW_KB_TAN;
+        f.vz += nz * dir * kb + tz * kb * DRAW_KB_TAN;
+      };
+      pushWithTan(P, -1);
+      pushWithTan(C, +1);
     }
     triggerClashFX((P.x + C.x) / 2, (P.z + C.z) / 2, 0.55, true);
     addHitstop(0.06);
