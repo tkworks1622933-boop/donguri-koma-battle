@@ -351,10 +351,9 @@ let CPU_TAP_RATE = DIFFICULTY_RATES.normal;  // CPUがタップ判定（ジャ�
 const CLASH_WIN_DMG = 1.6;  // タップの勝敗がついたとき、勝者が与えるダメージの倍率
 const KB_PUSH = 2.4;        // タップで負けた側への追加ノックバックの強さ
 const DRAW_KB_TAN = 0.4;    // 相殺ノックバックに混ぜる時計回り接線成分の割合（対ノックバック量）
-const DRAW_VR_CAP = 2.4;    // 相殺ノックバック後の外向き（径方向）速度の上限（中央付近での値）
-const DRAW_LIP_MARGIN = 0.15; // 相殺ノックバックでヘリ手前に止める余白
+const DRAW_SLIDE_TIME = 0.8; // 相殺ノックバックの影響が残る時間（秒）。この間にヘリへ着くと場外に出ずヘリに沿って流れる
 const FAIL_KB_RATE = 0.15;  // 失敗回数1回ごとにノックバックが増える割合
-const TENSION_PULL = 0.35;  // テンション1段階あたりの引き寄せ加速度
+const TENSION_PULL = 0.5;   // テンション1段階あたりの引き寄せ加速度（0.35→0.5に強化）
 const TENSION_CAP = 8;      // テンション効果の上限段階
 const OPENING_PULL = 1.5;   // 序盤ブースト：発射直後だけ働く追加の引き寄せ加速度（最大値）
 const OPENING_TIME = 5.0;   // 序盤ブーストが線形に減衰して消えるまでの秒数（初接触でも終了）
@@ -720,7 +719,7 @@ function makeFighter(sel, side){
     sel, stats: calcStats(sel), mesh,
     x:0, z:0, vx:0, vz:0, spin:100,
     launched:false, out:false, outTime:0,
-    fails:0, stagger:null, lipPassed:false,
+    fails:0, stagger:null, lipPassed:false, drawSlideUntil:-1,
     phase: Math.random() * Math.PI * 2,
     spinDir: side === 'player' ? -1 : 1,
     orbit: 1,   // 土俵を周回する向き（両者とも時計回り）
@@ -795,23 +794,6 @@ function showClash(kind, text){
   feedbackUntil = nowS() + 0.7;
 }
 
-/* 相殺ノックバックの上限：跳ね返ったコマがヘリ（LIP_R）まで到達しないよう、
-   ノックバック後の外向き（径方向）速度だけを絞る（接線成分＝周回の流れは残す）。
-   上限は「斜面の引力（SLOPE_PULL×距離）でヘリの手前 DRAW_LIP_MARGIN に止まれる速度」
-   から逆算し、中央付近では DRAW_VR_CAP がそのまま上限になる */
-function capDrawRadial(f){
-  const r = Math.hypot(f.x, f.z);
-  if (r < 0.3) return;
-  const room = Math.max(0, LIP_R - DRAW_LIP_MARGIN - r);
-  const cap = Math.min(DRAW_VR_CAP, Math.sqrt(2 * SLOPE_PULL * r * room));
-  const ux = f.x / r, uz = f.z / r;
-  const vr = f.vx * ux + f.vz * uz;
-  if (vr > cap){
-    f.vx -= (vr - cap) * ux;
-    f.vz -= (vr - cap) * uz;
-  }
-}
-
 /* 衝突の物理（跳ね返り）は即時適用し、スピンダメージだけをここに預ける。
    タップの「後から±TAP_WINDOW」も拾えるよう、窓が閉じてから resolvePendingClash で確定する */
 function registerClash(dmgToP, dmgToC){
@@ -861,9 +843,10 @@ function resolvePendingClash(){
       };
       pushWithTan(P, -1);
       pushWithTan(C, +1);
-      // 相殺の跳ね返りではヘリまで届かせない（通常衝突・ジャストのノックバックには適用しない）
-      capDrawRadial(P);
-      capDrawRadial(C);
+      // 相殺ノックバックの影響下にある印。この間にヘリへ到達したら場外に出ず、
+      // ヘリに沿って流れる（ヘリ処理ブロック側で deflection を適用する）
+      P.drawSlideUntil = fightTime + DRAW_SLIDE_TIME;
+      C.drawSlideUntil = fightTime + DRAW_SLIDE_TIME;
     }
     triggerClashFX((P.x + C.x) / 2, (P.z + C.z) / 2, 0.55, true);
     addHitstop(0.06);
@@ -1011,6 +994,16 @@ function stepBattle(dt){
             f.vx -= (1 + 0.55) * vr * nx;   // 反発係数0.55で跳ね返す
             f.vz -= (1 + 0.55) * vr * nz;
             f.spin -= 1.0;                  // ヘリに当たった分だけ少し回転を失う
+          }
+        } else if (fightTime < f.drawSlideUntil){
+          // 相殺ノックバックの影響下：ヘリで場外に出ず（踏ん張りにも入らず）、
+          // ヘリに沿って流れる。外向き（径方向）成分を打ち消し、
+          // その分を時計回りの接線方向へ回す
+          f.x = nx * LIP_R; f.z = nz * LIP_R;
+          if (vr > 0){
+            const tx = -nz * f.orbit, tz = nx * f.orbit;  // 時計回りの接線（周回力と同じ定義）
+            f.vx -= vr * nx; f.vz -= vr * nz;             // 径方向成分を打ち消す
+            f.vx += vr * tx; f.vz += vr * tz;             // その分を接線方向へ回す
           }
         } else if (vr < LIP_SPEED){
           f.x = nx * LIP_R; f.z = nz * LIP_R;
