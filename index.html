@@ -173,39 +173,43 @@
 import * as THREE from 'three';
 
 /* ================= パーツ定義 =================
-   st: かいてん(spin) / こうげき(atk) / ぼうぎょ(def) / あんてい(stab) への寄与 */
+   st: こうげき(atk) / たいりょく(hp) / スピード(spd) への寄与。
+   同種パーツ同士は合計が全て同じ（軸=6、本体=9、オプション=3）で優劣はなく、配分だけが違う。
+   合計値に上限は設けず、そのまま係数に使う */
 const AXES = {
-  normal: { name:'ふつう',   len:1.0,  r:0.050, mass:1.00, st:{ spin:3, atk:3, def:3, stab:3 } },
-  long:   { name:'ロング',   len:1.5,  r:0.050, mass:1.00, st:{ spin:5, atk:2, def:3, stab:5 } },
-  short:  { name:'ショート', len:0.62, r:0.050, mass:0.95, st:{ spin:1, atk:5, def:3, stab:2 } },
-  fat:    { name:'ふと軸',   len:1.0,  r:0.105, mass:1.30, st:{ spin:3, atk:4, def:4, stab:3 } },
+  normal: { name:'ふつう',   len:1.0,  r:0.050, mass:1.00, st:{ atk:2, hp:2, spd:2 } },
+  long:   { name:'ロング',   len:1.5,  r:0.050, mass:1.00, st:{ atk:1, hp:4, spd:1 } },
+  short:  { name:'ショート', len:0.62, r:0.050, mass:0.95, st:{ atk:4, hp:1, spd:1 } },
+  fat:    { name:'ふと軸',   len:1.0,  r:0.105, mass:1.30, st:{ atk:3, hp:3, spd:0 } },
 };
 const BODIES = {
-  maru: { name:'まる型', sx:1.00, sy:1.00, mass:1.00, st:{ spin:4, atk:4, def:4, stab:4 } },
-  hoso: { name:'ほそ型', sx:0.82, sy:1.30, mass:0.80, st:{ spin:3, atk:6, def:2, stab:3 } },
-  hira: { name:'ひら型', sx:1.16, sy:0.60, mass:1.10, st:{ spin:4, atk:2, def:6, stab:6 } },
+  maru: { name:'まる型', sx:1.00, sy:1.00, mass:1.00, st:{ atk:3, hp:3, spd:3 } },
+  hoso: { name:'ほそ型', sx:0.82, sy:1.30, mass:0.80, st:{ atk:3, hp:1, spd:5 } },
+  hira: { name:'ひら型', sx:1.16, sy:0.60, mass:1.10, st:{ atk:2, hp:5, spd:2 } },
 };
 const OPTIONS = {
-  none:  { name:'なし',   mass:1.00, st:{ spin:0, atk:0, def:0, stab:0 } },
-  toge:  { name:'トゲ',   mass:1.05, st:{ spin:0, atk:2, def:0, stab:0 }, spike:true },
-  ring:  { name:'リング', mass:1.10, st:{ spin:1, atk:0, def:3, stab:1 } },
-  omori: { name:'おもり', mass:1.35, st:{ spin:-1, atk:2, def:1, stab:0 } },
+  none:  { name:'なし',   mass:1.00, st:{ atk:1, hp:1, spd:1 } },
+  toge:  { name:'トゲ',   mass:1.05, st:{ atk:3, hp:0, spd:0 } },
+  ring:  { name:'リング', mass:1.10, st:{ atk:0, hp:2, spd:1 } },
+  omori: { name:'おもり', mass:1.35, st:{ atk:2, hp:1, spd:0 } },
 };
 const STAT_KEYS = [
-  ['spin','かいてん'], ['atk','こうげき'], ['def','ぼうぎょ'], ['stab','あんてい'],
+  ['atk','こうげき'], ['hp','たいりょく'], ['spd','スピード'],
 ];
 
 function calcStats(sel){
   const a = AXES[sel.axis], b = BODIES[sel.body], o = OPTIONS[sel.option];
   const st = {};
   for (const [k] of STAT_KEYS){
-    st[k] = Math.max(1, Math.min(12, a.st[k] + b.st[k] + o.st[k]));
+    st[k] = a.st[k] + b.st[k] + o.st[k];   // 上限なし：合計値をそのまま使う
   }
   return {
     st,
+    atkMult: 0.55 + 0.09 * st.atk,   // 衝突で与えるダメージの倍率
+    maxSpin: 60 + 10 * st.hp,        // 最大体力（スピンの上限）
+    spdMult: 0.75 + 0.06 * st.spd,   // そのコマ個別の速度倍率
     mass: a.mass * b.mass * o.mass,
     radius: b.sx,                 // 基準半径1 × 本体の横スケール
-    spike: !!o.spike,
   };
 }
 
@@ -380,9 +384,8 @@ const BOOST_DMG = 2;        // ブースト中にジャストの勝敗がつい�
 const PLAYER_START_HOUR = 7, PLAYER_TARGET_HOUR = 11;  // プレイヤーの発射位置→目標位置（時）
 const CPU_START_HOUR = 1, CPU_TARGET_HOUR = 5;         // CPUの発射位置→目標位置（時）
 const START_R = 5.0;        // 発射位置の中心からの距離（ヘリの内側の斜面上）
-/* スピン自然減衰（/秒）。時間経過での体力減りを抑えるため全体を従来の0.7倍にした。
-   変更前：max(1.4, 7.6 − かいてん×0.55) → 変更後：max(0.98, 5.32 − かいてん×0.385) */
-const spinDecayPerSec = st => Math.max(0.98, 5.32 - st.spin * 0.385);
+/* スピン自然減衰（/秒）。ステータスに依存しない一定値 */
+const SPIN_DECAY = 3.2;
 const battleScene = new THREE.Scene();
 battleScene.background = new THREE.Color(0xf7ead2);
 addLights(battleScene, 9);
@@ -640,10 +643,15 @@ function updateStats(){
   const wrap = document.getElementById('stats');
   wrap.innerHTML = '';
   for (const [key, label] of STAT_KEYS){
-    // 内部値1〜12を5段階に換算（最低1、満点5）
-    const level = Math.max(1, Math.min(5, Math.round(st[key] / 12 * 5)));
-    const pips = `<span class="on">${'▶'.repeat(level)}</span>` +
-      `<span class="off">${'▷'.repeat(5 - level)}</span>`;
+    // ▶の数＝ステータス値そのもの（上限を前提にした換算はしない）。
+    // 読みやすさのため5個ごとに少し間を空ける
+    const v = st[key];
+    let marks = '';
+    for (let i = 0; i < v; i++){
+      if (i > 0 && i % 5 === 0) marks += ' ';
+      marks += '▶';
+    }
+    const pips = `<span class="on">${marks}</span>`;
     const row = document.createElement('div');
     row.className = 'stat';
     row.innerHTML = `<span class="slabel">${label}</span><span class="pips">${pips}</span>`;
@@ -744,9 +752,10 @@ function makeFighter(sel, side){
   const mesh = buildTopMesh(sel, side);
   mesh.visible = false;
   battleScene.add(mesh);
+  const stats = calcStats(sel);
   return {
-    sel, stats: calcStats(sel), mesh,
-    x:0, z:0, vx:0, vz:0, spin:100,
+    sel, stats, mesh,
+    x:0, z:0, vx:0, vz:0, spin: stats.maxSpin,   // 体力は最大値で始める
     launched:false,
     fails:0, dying:false, dyingSeq:0,
     phase: Math.random() * Math.PI * 2,
@@ -803,7 +812,7 @@ function launchFighter(f, startHour, targetHour, powerVal){
   const speed = (5.2 + powerVal * 0.075) / Math.sqrt(f.stats.mass);
   f.vx = jx * speed;
   f.vz = jz * speed;
-  f.spin = 100; f.launched = true;
+  f.spin = f.stats.maxSpin; f.launched = true;
   f.mesh.visible = true;
 }
 
@@ -984,10 +993,11 @@ function stepBattle(dt){
   const boostMult = currentBoostMult();   // プレイヤーのブースト倍率（このフレームの値）
   for (const f of [P, C]){
     if (!f.launched) continue;
-    // このコマの速度スケール：両コマ共通のペース倍率 ×（プレイヤーのみ）ブースト倍率
-    const spdScale = paceMult * (f === P ? boostMult : 1);
-    // スピン減衰（かいてんが高いほど長持ち）
-    f.spin -= spinDecayPerSec(f.stats.st) * dt;
+    // このコマの速度スケール：両コマ共通のペース倍率 × そのコマ個別のスピード倍率
+    // ×（プレイヤーのみ）ブースト倍率
+    const spdScale = paceMult * f.stats.spdMult * (f === P ? boostMult : 1);
+    // スピン減衰（ステータスに依存しない一定値）
+    f.spin -= SPIN_DECAY * dt;
     const d = Math.hypot(f.x, f.z);
     // すり鉢効果：斜面に沿って中心へ引かれる（距離に比例。傾斜強化で係数2.4→3.0）
     // 縁（ARENA_R）の外側では斜面が下向きに転じるので、外へ滑り落ちる力に切り替える
@@ -1079,8 +1089,8 @@ function stepBattle(dt){
     const minDist = P.stats.radius + C.stats.radius;
     if (dist > 0.0001 && dist < minDist){
       const nx = dx / dist, nz = dz / dist;
-      const mP = P.stats.mass * (1 + P.stats.st.stab * 0.04);
-      const mC = C.stats.mass * (1 + C.stats.st.stab * 0.04);
+      const mP = P.stats.mass;
+      const mC = C.stats.mass;
       const invP = 1 / mP, invC = 1 / mC, invSum = invP + invC;
       // めり込み解消
       const overlap = minDist - dist;
@@ -1104,11 +1114,10 @@ function stepBattle(dt){
         // 接触点で演出（火花・衝撃波・シェイク・効果音）。強い衝突ではヒットストップも
         triggerClashFX(P.x + nx * P.stats.radius, P.z + nz * P.stats.radius, strength, false);
         if (strength > 0.5) addHitstop(0.06);
-        const dmg = (atkF, defF) => Math.max(0.3,
-          (1.0 + Math.max(-2, Math.min(8, atkF.stats.st.atk - defF.stats.st.def)) * 0.55
-            + (atkF.stats.spike ? 2.2 : 0)) * impact);
+        // 与ダメージは攻撃側の「こうげき」倍率だけで決まる（防御・トゲ等の特殊補正は廃止）
+        const dmg = atkF => Math.max(0.3, atkF.stats.atkMult * impact);
         // スピンダメージは即時適用せず、タップ判定（resolvePendingClash）に委ねる
-        registerClash(dmg(C, P), dmg(P, C));
+        registerClash(dmg(C), dmg(P));
       }
     }
   }
@@ -1140,18 +1149,19 @@ function syncFighters(dt, t){
     const d = Math.hypot(f.x, f.z);
     let y = bowlY(Math.min(d, ARENA_R + 0.6));
     const spinNow = Math.max(0, f.spin);
-    // フラフラは見た目だけ：スピンが弱いほどメッシュの表示位置を小さく揺らす
-    // （物理位置 f.x/f.z には一切触れない。揺れの大きさは あんてい で軽減）
+    const spinRatio = spinNow / f.stats.maxSpin;   // 体力の残り割合（フラフラはこの割合だけで決める）
+    // フラフラは見た目だけ：スピンの残り割合が低いほどメッシュの表示位置を小さく揺らす
+    // （物理位置 f.x/f.z には一切触れない）
     let jx = 0, jz = 0;
-    if (spinNow < 50){
-      const wob = (50 - spinNow) / 50;
-      const amp = wob * Math.max(0.3, 1.6 - f.stats.st.stab * 0.13) * 0.055;
+    if (spinRatio < 0.5){
+      const wob = (0.5 - spinRatio) / 0.5;
+      const amp = wob * 0.055;
       jx = Math.sin(t * 13.7 + f.phase * 3.1) * amp;
       jz = Math.cos(t * 11.3 + f.phase * 2.3) * amp;
     }
     f.mesh.position.set(f.x + jx, y, f.z + jz);
-    f.mesh.userData.spinG.rotation.y += f.spinDir * (3 + spinNow * 0.45) * dt;
-    const tilt = (1 - spinNow / 100) * 0.30;
+    f.mesh.userData.spinG.rotation.y += f.spinDir * (3 + spinRatio * 45) * dt;
+    const tilt = (1 - spinRatio) * 0.30;
     f.mesh.rotation.x = Math.cos(t * 6.7 + f.phase) * tilt * 0.5;
     f.mesh.rotation.z = Math.sin(t * 8.0 + f.phase) * tilt * 0.5;
     // 瀕死サイン：本体（実と帽子）を赤く点滅させる。復活すれば元の色に戻る
@@ -1173,8 +1183,9 @@ function syncFighters(dt, t){
       }
     }
   }
-  spinBarP.style.width = Math.max(0, fighters.player.spin) + '%';
-  spinBarC.style.width = Math.max(0, fighters.cpu.spin) + '%';
+  // ゲージは自分の最大体力に対する割合で表示する
+  spinBarP.style.width = Math.max(0, fighters.player.spin / fighters.player.stats.maxSpin * 100) + '%';
+  spinBarC.style.width = Math.max(0, fighters.cpu.spin / fighters.cpu.stats.maxSpin * 100) + '%';
   // 瀕死サイン：そのコマ側のゲージも赤く点滅させる
   spinBarP.style.background = fighters.player.dying ? (blinkOn ? GAUGE_RED_ON : GAUGE_RED_OFF) : GAUGE_P;
   spinBarC.style.background = fighters.cpu.dying ? (blinkOn ? GAUGE_RED_ON : GAUGE_RED_OFF) : GAUGE_C;
