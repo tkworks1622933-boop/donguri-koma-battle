@@ -337,7 +337,9 @@ previewCam.lookAt(0, 1.0, 0);
 
 /* --- バトル用シーン --- */
 const ARENA_R = 6;                       // 土俵の半径
-const bowlY = r => 1.2 * (r / ARENA_R) * (r / ARENA_R);  // すり鉢の高さ（中心→縁で1.2）
+const BOWL_DEPTH = 1.5;                  // すり鉢の深さ（中心→縁の高さ。傾斜強化で1.2→1.5）
+const bowlY = r => BOWL_DEPTH * (r / ARENA_R) * (r / ARENA_R);  // すり鉢の高さ
+const SLOPE_PULL = 3.0;                  // 斜面で中心へ引かれる力の係数（傾斜強化で2.4→3.0）
 const LIP_R = 5.9;          // 縁のヘリの位置（中心からの距離）
 const LIP_SPEED = 3.2;      // ヘリを越えるのに必要な外向き（径方向）の速度
 /* --- 衝突タイミング＆踏みとどまりの調整パラメータ --- */
@@ -349,6 +351,8 @@ let CPU_TAP_RATE = DIFFICULTY_RATES.normal;  // CPUがタップ判定（ジャ�
 const CLASH_WIN_DMG = 1.6;  // タップの勝敗がついたとき、勝者が与えるダメージの倍率
 const KB_PUSH = 2.4;        // タップで負けた側への追加ノックバックの強さ
 const DRAW_KB_TAN = 0.4;    // 相殺ノックバックに混ぜる時計回り接線成分の割合（対ノックバック量）
+const DRAW_VR_CAP = 2.4;    // 相殺ノックバック後の外向き（径方向）速度の上限（中央付近での値）
+const DRAW_LIP_MARGIN = 0.15; // 相殺ノックバックでヘリ手前に止める余白
 const FAIL_KB_RATE = 0.15;  // 失敗回数1回ごとにノックバックが増える割合
 const TENSION_PULL = 0.35;  // テンション1段階あたりの引き寄せ加速度
 const TENSION_CAP = 8;      // テンション効果の上限段階
@@ -356,9 +360,15 @@ const OPENING_PULL = 1.5;   // 序盤ブースト：発射直後だけ働く追�
 const OPENING_TIME = 5.0;   // 序盤ブーストが線形に減衰して消えるまでの秒数（初接触でも終了）
 const STAGGER_WINDOW = 0.25;// ヘリで踏みとどまるためのタップ猶予（秒）
 const STAGGER_SPIN_COST = 8;// 踏みとどまり成功時に失うスピン
-const PLAYER_PHI = -75 * Math.PI / 180;  // プレイヤーの発射位置（12時〜1時方向）
-const CPU_PHI = 105 * Math.PI / 180;     // CPUの発射位置（6時〜7時方向）
-const START_R = 4.6;        // 発射位置の中心からの距離
+/* スタート方式：時計の文字盤の位置から、目標の時計位置へ真っ直ぐ発射する直進ダッシュ。
+   プレイヤーは7時→11時（左側を上がる）、CPUは1時→5時（右側を下がる）で、
+   直進＋すり鉢の傾斜＋周回力が合わさって時計回りの流れになる */
+const PLAYER_START_HOUR = 7, PLAYER_TARGET_HOUR = 11;  // プレイヤーの発射位置→目標位置（時）
+const CPU_START_HOUR = 1, CPU_TARGET_HOUR = 5;         // CPUの発射位置→目標位置（時）
+const START_R = 5.0;        // 発射位置の中心からの距離（ヘリの内側の斜面上）
+/* スピン自然減衰（/秒）。時間経過での体力減りを抑えるため全体を従来の0.7倍にした。
+   変更前：max(1.4, 7.6 − かいてん×0.55) → 変更後：max(0.98, 5.32 − かいてん×0.385) */
+const spinDecayPerSec = st => Math.max(0.98, 5.32 - st.spin * 0.385);
 const battleScene = new THREE.Scene();
 battleScene.background = new THREE.Color(0xf7ead2);
 addLights(battleScene, 9);
@@ -371,7 +381,7 @@ const battleCam = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
   battleScene.add(ground);
 
   const bowl = latheFrom([
-    [0.001,0.00],[1.0,0.03],[2.0,0.13],[3.0,0.30],[4.0,0.53],[5.0,0.83],[5.5,1.01],[6.0,1.20],[6.35,1.38],[6.6,1.12],
+    [0.001,0.00],[1.0,0.04],[2.0,0.17],[3.0,0.38],[4.0,0.67],[5.0,1.04],[5.5,1.26],[6.0,1.50],[6.35,1.73],[6.6,1.40],
   ], new THREE.MeshStandardMaterial({ color:0xffffff, vertexColors:true, roughness:0.85, side:THREE.DoubleSide }));
   bowl.castShadow = false; bowl.receiveShadow = true;
   // 中心からの距離に応じた色の濃淡（中心は深く、縁にいくほど明るく）で窪みを表現
@@ -395,7 +405,7 @@ const battleCam = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
   const rim = new THREE.Mesh(
     new THREE.TorusGeometry(6.35, 0.13, 12, 56),
     new THREE.MeshStandardMaterial({ color:0x6e4520, roughness:0.8 }));
-  rim.rotation.x = Math.PI / 2; rim.position.y = 1.38;
+  rim.rotation.x = Math.PI / 2; rim.position.y = 1.73;
   battleScene.add(rim);
 
   // 縁の内側の低いヘリ（唇状の盛り上がり）。リムより低く・細くして「ちょっとした」段差にする
@@ -736,17 +746,24 @@ function startBattle(){
   launchBtn.disabled = false;
 }
 
-function launchFighter(f, phi, powerVal){
-  f.x = Math.cos(phi) * START_R;
-  f.z = Math.sin(phi) * START_R;
-  // 初速は接線方向が主体（土俵を周回する向き）＋少しだけ内向き。
-  // 接線の符号は周回力（orbit）と噛み合う向きにそろえ、回り続ける流れにする
-  let cx = -Math.sin(phi) * f.orbit * 0.88 - Math.cos(phi) * 0.30;
-  let cz =  Math.cos(phi) * f.orbit * 0.88 - Math.sin(phi) * 0.30;
-  const cl = Math.hypot(cx, cz); cx /= cl; cz /= cl;
-  const jitter = (Math.random() - 0.5) * 0.15;
-  const jx = cx * Math.cos(jitter) - cz * Math.sin(jitter);
-  const jz = cx * Math.sin(jitter) + cz * Math.cos(jitter);
+/* 時計の文字盤上の位置（h時方向・半径r）の座標。
+   画面との対応：12時＝奥（-Z）、3時＝右（+X）、6時＝手前（+Z）、9時＝左（-X） */
+function clockPos(h, r){
+  const th = h * Math.PI / 6;
+  return { x: Math.sin(th) * r, z: -Math.cos(th) * r };
+}
+
+function launchFighter(f, startHour, targetHour, powerVal){
+  const s = clockPos(startHour, START_R);
+  const t = clockPos(targetHour, START_R);
+  f.x = s.x; f.z = s.z;
+  // 初速は目標の時計位置（同じ半径の点）への直線方向。大きさは従来どおり
+  // （プレイヤーは長押しパワー、CPUはランダム）で、わずかなブレだけ付ける
+  let dx = t.x - s.x, dz = t.z - s.z;
+  const dl = Math.hypot(dx, dz); dx /= dl; dz /= dl;
+  const jitter = (Math.random() - 0.5) * 0.12;
+  const jx = dx * Math.cos(jitter) - dz * Math.sin(jitter);
+  const jz = dx * Math.sin(jitter) + dz * Math.cos(jitter);
   const speed = (5.2 + powerVal * 0.075) / Math.sqrt(f.stats.mass);
   f.vx = jx * speed;
   f.vz = jz * speed;
@@ -776,6 +793,23 @@ function showClash(kind, text){
   timingRing.classList.remove('good', 'draw', 'bad');
   if (kind) timingRing.classList.add(kind);
   feedbackUntil = nowS() + 0.7;
+}
+
+/* 相殺ノックバックの上限：跳ね返ったコマがヘリ（LIP_R）まで到達しないよう、
+   ノックバック後の外向き（径方向）速度だけを絞る（接線成分＝周回の流れは残す）。
+   上限は「斜面の引力（SLOPE_PULL×距離）でヘリの手前 DRAW_LIP_MARGIN に止まれる速度」
+   から逆算し、中央付近では DRAW_VR_CAP がそのまま上限になる */
+function capDrawRadial(f){
+  const r = Math.hypot(f.x, f.z);
+  if (r < 0.3) return;
+  const room = Math.max(0, LIP_R - DRAW_LIP_MARGIN - r);
+  const cap = Math.min(DRAW_VR_CAP, Math.sqrt(2 * SLOPE_PULL * r * room));
+  const ux = f.x / r, uz = f.z / r;
+  const vr = f.vx * ux + f.vz * uz;
+  if (vr > cap){
+    f.vx -= (vr - cap) * ux;
+    f.vz -= (vr - cap) * uz;
+  }
 }
 
 /* 衝突の物理（跳ね返り）は即時適用し、スピンダメージだけをここに預ける。
@@ -827,6 +861,9 @@ function resolvePendingClash(){
       };
       pushWithTan(P, -1);
       pushWithTan(C, +1);
+      // 相殺の跳ね返りではヘリまで届かせない（通常衝突・ジャストのノックバックには適用しない）
+      capDrawRadial(P);
+      capDrawRadial(C);
     }
     triggerClashFX((P.x + C.x) / 2, (P.z + C.z) / 2, 0.55, true);
     addHitstop(0.06);
@@ -899,25 +936,25 @@ function stepBattle(dt){
 
   if (cpuTimer > 0){
     cpuTimer -= dt;
-    if (cpuTimer <= 0) launchFighter(C, CPU_PHI, 45 + Math.random() * 50);
+    if (cpuTimer <= 0) launchFighter(C, CPU_START_HOUR, CPU_TARGET_HOUR, 45 + Math.random() * 50);
   }
 
   for (const f of [P, C]){
     if (!f.launched || f.out) continue;
     if (f.stagger){
       // ヘリの上でたたらを踏んでいる間は位置を固定し、スピンだけ減らす
-      f.spin -= Math.max(1.4, 7.6 - f.stats.st.spin * 0.55) * dt;
+      f.spin -= spinDecayPerSec(f.stats.st) * dt;
       stepStagger(f, dt);
       continue;
     }
     if (Math.hypot(f.x, f.z) < LIP_R - 0.3) f.lipPassed = false;
     // スピン減衰（かいてんが高いほど長持ち）
-    f.spin -= Math.max(1.4, 7.6 - f.stats.st.spin * 0.55) * dt;
+    f.spin -= spinDecayPerSec(f.stats.st) * dt;
     const d = Math.hypot(f.x, f.z);
-    // すり鉢効果：斜面に沿って中心へ引かれる（距離に比例、旧0.85→2.4）
+    // すり鉢効果：斜面に沿って中心へ引かれる（距離に比例。傾斜強化で係数2.4→3.0）
     // 縁（ARENA_R）の外側では斜面が下向きに転じるので、外へ滑り落ちる力に切り替える
     if (d > 0.01){
-      const a = d <= ARENA_R ? 2.4 * d : -3.5;
+      const a = d <= ARENA_R ? SLOPE_PULL * d : -4.4;
       f.vx -= (f.x / d) * a * dt;
       f.vz -= (f.z / d) * a * dt;
     }
@@ -965,7 +1002,17 @@ function stepBattle(dt){
       if (dLip > LIP_R && dLip <= ARENA_R + 0.5){
         const nx = f.x / dLip, nz = f.z / dLip;
         const vr = f.vx * nx + f.vz * nz;   // 外向きの径方向速度
-        if (vr < LIP_SPEED){
+        if (!firstClash){
+          // 開幕制御：初接触までは、外向き速度の大きさに関わらずヘリで必ず跳ね返す。
+          // 開幕の直進ダッシュでそのまま場外に出てしまわないようにするため
+          // （リングアウトせず、踏みとどまりタップも不要）。初接触以降は下の通常ルール
+          f.x = nx * LIP_R; f.z = nz * LIP_R;
+          if (vr > 0){
+            f.vx -= (1 + 0.55) * vr * nx;   // 反発係数0.55で跳ね返す
+            f.vz -= (1 + 0.55) * vr * nz;
+            f.spin -= 1.0;                  // ヘリに当たった分だけ少し回転を失う
+          }
+        } else if (vr < LIP_SPEED){
           f.x = nx * LIP_R; f.z = nz * LIP_R;
           if (vr > 0){
             f.vx -= (1 + 0.55) * vr * nx;   // 反発係数0.55で跳ね返す
@@ -1095,8 +1142,8 @@ function releaseLaunch(){
   if (!charging) return;
   charging = false;
   if (phase !== 'ready' || !fighters) return;
-  launchFighter(fighters.player, PLAYER_PHI, power);
-  launchFighter(fighters.cpu, CPU_PHI, 45 + Math.random() * 50);   // CPUも同時に発射（着地タイミングを揃える）
+  launchFighter(fighters.player, PLAYER_START_HOUR, PLAYER_TARGET_HOUR, power);
+  launchFighter(fighters.cpu, CPU_START_HOUR, CPU_TARGET_HOUR, 45 + Math.random() * 50);   // CPUも同時に発射（着地タイミングを揃える）
   phase = 'fight'; fightTime = 0; cpuTimer = -1;
   launchBtn.disabled = true;
   powerFill.style.width = '0%';
@@ -1163,10 +1210,10 @@ const battleCamBase = new THREE.Vector3(0, 20, 16);   // フィットで決ま�
 const fitPoints = [];
 for (let i = 0; i < 24; i++){
   const a = (i / 24) * Math.PI * 2, ca = Math.cos(a), sa = Math.sin(a);
-  fitPoints.push(new THREE.Vector3(6.60 * ca, 1.30, 6.60 * sa));  // すり鉢の外周
-  fitPoints.push(new THREE.Vector3(6.48 * ca, 1.51, 6.48 * sa));  // リムの外周・上端
+  fitPoints.push(new THREE.Vector3(6.60 * ca, 1.45, 6.60 * sa));  // すり鉢の外周（深さ1.5に合わせた高さ）
+  fitPoints.push(new THREE.Vector3(6.48 * ca, 1.86, 6.48 * sa));  // リムの外周・上端（リム中心1.73＋管半径0.13）
 }
-fitPoints.push(new THREE.Vector3(0, 1.51, 0));
+fitPoints.push(new THREE.Vector3(0, 1.86, 0));
 const _fitV = new THREE.Vector3();
 function battleFits(d){
   battleCam.position.copy(battleDir).multiplyScalar(d);
