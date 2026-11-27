@@ -40,7 +40,7 @@
   #screen-title .btn.sub{ margin-top:14px; }
 
   /* ---------- 組み立て ---------- */
-  #build-preview-space{ flex:1 1 auto; min-height:0; }
+  #build-preview-space{ flex:1 1 auto; min-height:0; position:relative; }
   #build-panel{
     background:var(--panel); border-radius:22px 22px 0 0;
     padding:10px 16px calc(14px + env(safe-area-inset-bottom));
@@ -53,12 +53,22 @@
     background:#fffdf6; color:var(--ink); border:2px solid var(--line);
   }
   .chip.sel{ background:var(--accent); border-color:var(--accent); color:#fff; font-weight:700; }
-  .stats{ margin:12px 0 4px; display:grid; grid-template-columns:1fr; gap:5px 18px; }
-  .stat{ display:flex; align-items:center; gap:8px; font-size:12px; }
-  .stat .slabel{ width:4.2em; flex:none; color:#7a5a36; }
-  .stat .pips{ font-size:10px; letter-spacing:1px; line-height:1.25; overflow-wrap:anywhere; }
-  .stat .pips .on{ color:var(--accent); }
-  .stat .pips .off{ color:#e0cda1; }
+  /* ステータスウィンドウ：プレビューの右横に重ねるパネル */
+  #stats-panel{
+    position:absolute; top:10px; right:10px; width:42%; max-width:200px;
+    background:rgba(255,250,238,.88); border:1.5px solid var(--line); border-radius:14px;
+    padding:10px 12px; box-shadow:0 4px 14px rgba(110,69,32,.15);
+    pointer-events:none;
+  }
+  #stats-panel .stats{ display:flex; flex-direction:column; gap:7px; }
+  #stats-panel .stat{ display:flex; align-items:center; gap:7px; font-size:12px; }
+  #stats-panel .slabel{ width:3.9em; flex:none; white-space:nowrap; color:#7a5a36; font-weight:700; }
+  #stats-panel .marks{ display:flex; align-items:center; flex-wrap:wrap; row-gap:2px; }
+  #stats-panel .ic{ color:var(--accent); line-height:1; }
+  #stats-panel .ic.s10{ font-size:16px; }
+  #stats-panel .ic.s5{ font-size:12.5px; }
+  #stats-panel .ic.s1{ font-size:9.5px; }
+  #stats-panel .icgap{ width:5px; flex:none; }
   #build-panel .btn{ width:100%; margin-top:12px; }
 
   /* ---------- バトル ---------- */
@@ -123,7 +133,9 @@
 
 <!-- 組み立て -->
 <div id="screen-build" class="screen">
-  <div id="build-preview-space"></div>
+  <div id="build-preview-space">
+    <div id="stats-panel"><div class="stats" id="stats"></div></div>
+  </div>
   <div id="build-panel">
     <div class="group-label">軸</div>
     <div class="chips" id="chips-axis"></div>
@@ -133,7 +145,6 @@
     <div class="chips" id="chips-option"></div>
     <div class="group-label">難易度</div>
     <div class="chips" id="chips-difficulty"></div>
-    <div class="stats" id="stats"></div>
     <button id="battle-btn" class="btn">バトル開始</button>
   </div>
 </div>
@@ -655,23 +666,27 @@ function refreshPreview(){
   updateStats();
 }
 
+// 値→アイコン列の変換（額面方式）：★＝10、◆＝5、▶＝1。
+// 大きさで格が伝わるよう、★＞◆＞▶ の順にフォントサイズを変えてある（CSS側）
+function statIcons(v){
+  const groups = [];
+  const tens  = Math.floor(v / 10);
+  const fives = Math.floor((v % 10) / 5);
+  const ones  = v % 5;
+  if (tens)  groups.push(`<span class="ic s10">${'★'.repeat(tens)}</span>`);
+  if (fives) groups.push(`<span class="ic s5">${'◆'.repeat(fives)}</span>`);
+  if (ones)  groups.push(`<span class="ic s1">${'▶'.repeat(ones)}</span>`);
+  return groups.join('<span class="icgap"></span>');
+}
+
 function updateStats(){
   const { st } = calcStats(selection);
   const wrap = document.getElementById('stats');
   wrap.innerHTML = '';
   for (const [key, label] of STAT_KEYS){
-    // ▶の数＝ステータス値そのもの（上限を前提にした換算はしない）。
-    // 読みやすさのため5個ごとに少し間を空ける
-    const v = st[key];
-    let marks = '';
-    for (let i = 0; i < v; i++){
-      if (i > 0 && i % 5 === 0) marks += ' ';
-      marks += '▶';
-    }
-    const pips = `<span class="on">${marks}</span>`;
     const row = document.createElement('div');
     row.className = 'stat';
-    row.innerHTML = `<span class="slabel">${label}</span><span class="pips">${pips}</span>`;
+    row.innerHTML = `<span class="slabel">${label}</span><span class="marks">${statIcons(st[key])}</span>`;
     wrap.appendChild(row);
   }
 }
@@ -1558,8 +1573,12 @@ function animate(){
       // カメラを引いて、コマの表示サイズはタイトル画面の約70%にする
       const rect = document.getElementById('build-preview-space').getBoundingClientRect();
       previewCam.aspect = rect.width / Math.max(1, rect.height);
-      previewCam.position.set(0, 2.6, 7.54);
-      previewCam.lookAt(0, 1.0, 0);
+      // 右横のステータスパネルにコマが隠れないよう、視点中心を右へずらしてコマを左寄せに表示する
+      const camDist = Math.hypot(2.6 - 1.0, 7.54);
+      const visW = 2 * Math.tan(previewCam.fov * Math.PI / 360) * camDist * previewCam.aspect;
+      const shiftX = visW * 0.16;
+      previewCam.position.set(shiftX, 2.6, 7.54);
+      previewCam.lookAt(shiftX, 1.0, 0);
       previewCam.updateProjectionMatrix();
       const vy = window.innerHeight - rect.bottom;
       renderer.setScissorTest(true);
