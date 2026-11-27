@@ -164,7 +164,7 @@
     <div class="group-label">難易度</div>
     <div class="chips" id="chips-difficulty"></div>
     <div class="group-label">ブースト倍率（デバッグ）</div>
-    <div class="chips"><input type="number" id="boost-mult-input" class="num-input" value="4.0" step="0.5" min="0.5" max="20"></div>
+    <div class="chips"><input type="number" id="boost-mult-input" class="num-input" value="30" step="0.5" min="0.5" max="50"></div>
     <button id="battle-btn" class="btn">バトル開始</button>
   </div>
 </div>
@@ -423,7 +423,7 @@ const DRAW_KB_RATE = 0.25;  // 相殺1回ごとに相殺ノックバックが増
 const PACE_STEP = 0.10;     // 相殺1回ごとのペース倍率の上昇（+10%）
 const PACE_CAP = 2.0;       // ペース倍率の上限
 /* --- ブーストボタン（プレイヤー専用） --- */
-let BOOST_MULT = 4.0;       // ブースト中の速度倍率（ゲージ制限の導入に合わせ 2.0→4.0 に引き上げ）。組み立て画面のデバッグ入力で上書きされる
+let BOOST_MULT = 30;        // ブースト倍率（デバッグ入力の初期値）。効き方は「摩擦を 1/N に弱める＋遠心力補正」で、力そのものには掛からない。組み立て画面のデバッグ入力で上書きされる
 const BOOST_KEEP = 1.5;     // ボタンを離した後もブースト速度を維持する秒数
 const BOOST_FADE = 1.0;     // その後、通常速度へ戻るまでにかける秒数
 const BOOST_DMG = 2;        // ブースト受付時間内にジャストの勝敗がついたときのダメージ倍率
@@ -440,6 +440,7 @@ const CPU_START_HOUR = 1, CPU_TARGET_HOUR = 5;         // CPUの発射位置→�
 const START_R = 5.0;        // 発射位置の中心からの距離（ヘリの内側の斜面上）
 /* スピン自然減衰（/秒）。ステータスに依存しない一定値 */
 const SPIN_DECAY = 3.2;
+const BASE_FRICTION = 0.22;   // 速度の摩擦係数（/秒）。ブースト中はプレイヤーだけ 1/N に弱まる
 const battleScene = new THREE.Scene();
 battleScene.background = new THREE.Color(0xf7ead2);
 addLights(battleScene, 9);
@@ -1221,6 +1222,170 @@ function resolvePendingClash(){
   }
 }
 
+/* 物理の1ステップ（stepBattle からサブステップで複数回呼ばれる）。
+   力（斜面・周回ドライブ・押し出し・引き寄せ）はブースト前のスケールで計算し、
+   ブーストで変わるのはプレイヤーの摩擦の弱さと遠心力補正だけ */
+function stepPhysics(sdt, boostMult){
+  const P = fighters.player, C = fighters.cpu;
+for (const f of [P, C]){
+  if (!f.launched) continue;
+  // このコマの「力」のスケール：両コマ共通のペース倍率 × そのコマ個別のスピード倍率。
+  // ブースト倍率は力（周回ドライブ・最低速度の押し出し）には掛けない。
+  // ブーストで変わるのは摩擦の弱さと遠心力補正だけにして、「速さだけが変わる」形にする
+  const spdScale = paceMult * f.stats.spdMult;
+  const isBoosting = (f === P && boostMult > 1);
+  // スピン減衰（ステータスに依存しない一定値）
+  f.spin -= SPIN_DECAY * sdt;
+  const d = Math.hypot(f.x, f.z);
+  // すり鉢効果：斜面に沿って中心へ引かれる（距離に比例。傾斜強化で係数2.4→3.0）
+  // 縁（ARENA_R）の外側では斜面が下向きに転じるので、外へ滑り落ちる力に切り替える
+  if (d > 0.01){
+    const a = d <= ARENA_R ? SLOPE_PULL * d : -4.4;
+    f.vx -= (f.x / d) * a * sdt;
+    f.vz -= (f.z / d) * a * sdt;
+  }
+  // 遠心力の補正（ブースト中のみ）：速くなった分だけ軌道が外に膨らむのを防ぐ内向き加速度。
+  // 半径 d の円軌道に必要な向心加速度 v^2/d のうち、ブースト前の等価速度 (v/N) の分は
+  // 斜面とドライブがまかなう前提で、不足分 (1 - 1/N^2) だけを補う。
+  // これでブースト前と同じくらいのラインを速く回れる
+  if (isBoosting && d > 0.5){
+    const v2 = f.vx * f.vx + f.vz * f.vz;
+    const aCent = (v2 / d) * (1 - 1 / (boostMult * boostMult));
+    f.vx -= (f.x / d) * aCent * sdt;
+    f.vz -= (f.z / d) * aCent * sdt;
+  }
+  // 摩擦（旧0.5→0.22に弱めて、滑りが長続きするように）。
+  // ブースト中はプレイヤーだけ摩擦係数を 1/N に弱める：力はブースト前のまま、
+  // 減衰だけが弱くなるので、到達速度がおよそ N 倍まで伸びる
+  const fr = Math.exp(-BASE_FRICTION / (isBoosting ? boostMult : 1) * sdt);
+  f.vx *= fr; f.vz *= fr;
+  // 静止させない：進行方向を曲げて土俵を周回させる力＋最低速度の維持。
+  // 移動の挙動はスピン量に依存しない（スピン0＝瀕死でも今まで通り動き回る）。
+  // スピンが効くのは数値管理（ダメージ・減衰・瀕死判定）と
+  // 見た目のフラフラ（syncFighters 側）だけに限定する
+  {
+    const spd = Math.hypot(f.vx, f.vz);
+    if (spd > 0.05){
+      // 速度に垂直な向きの力（強さはスピン残量によらず一定）。両者とも時計回り
+      const px = -f.vz / spd, pz = f.vx / spd;
+      const drive = 1.15 * spdScale;
+      f.vx += px * f.orbit * drive * sdt;
+      f.vz += pz * f.orbit * drive * sdt;
+    }
+    if (spd < 0.55 * spdScale){
+      // 止まりそうになったら、土俵の接線方向へそっと押し出す
+      let tx, tz;
+      if (d > 0.3){ tx = (-f.z / d) * f.orbit; tz = (f.x / d) * f.orbit; }
+      else { tx = f.orbit; tz = 0; }
+      f.vx += tx * 2.4 * spdScale * sdt;
+      f.vz += tz * 2.4 * spdScale * sdt;
+    }
+  }
+  // 速度の上限（斜面加速での暴走防止）
+  {
+    const spd = Math.hypot(f.vx, f.vz);
+    const cap = 13 * spdScale * (isBoosting ? boostMult : 1);   // 安全弁。到達速度そのものは摩擦の仕組み側で決まる
+    if (spd > cap){ f.vx *= cap / spd; f.vz *= cap / spd; }
+  }
+  // ※フラつきの速度ノイズは廃止した（軌道を乱していたため）。
+  //   フラフラは syncFighters でメッシュの表示位置・傾きだけに付けている
+  f.x += f.vx * sdt;
+  f.z += f.vz * sdt;
+  // 縁のヘリ（常時ガードレール）：コマは決して場外に出ない。
+  // ヘリに到達したら位置を内側にクランプし、外向き（径方向）速度だけを
+  // 反発係数0.55で跳ね返す。接線成分は保持するので、周回の流れは止まらない
+  {
+    const dLip = Math.hypot(f.x, f.z);
+    if (dLip > LIP_R){
+      const nx = f.x / dLip, nz = f.z / dLip;
+      f.x = nx * LIP_R; f.z = nz * LIP_R;
+      const vr = f.vx * nx + f.vz * nz;   // 外向きの径方向速度
+      if (vr > 0){
+        f.vx -= (1 + 0.55) * vr * nx;
+        f.vz -= (1 + 0.55) * vr * nz;
+      }
+    }
+  }
+}
+
+// テンションによる引き寄せ（相殺が続くほど接近が速くなり、タップが難しくなる）
+if (tension > 0 && P.launched && C.launched){
+  const dx = C.x - P.x, dz = C.z - P.z;
+  const d = Math.hypot(dx, dz);
+  if (d > 0.01){
+    const a = TENSION_PULL * Math.min(tension, TENSION_CAP) * sdt;
+    P.vx += (dx / d) * a; P.vz += (dz / d) * a;
+    C.vx -= (dx / d) * a; C.vz -= (dz / d) * a;
+  }
+}
+
+// ブースト中の引き寄せ：プレイヤーのブーストで速度が上がっている間だけ、
+// 自コマが相手方向へ強く引かれ、軌道が相手に向かってはっきり曲がる。
+// 強さはブースト倍率の進み具合（(倍率-1)/(設定倍率-1)）に比例させるので、
+// 維持・減衰フェーズでは弱まりながら消えていく
+if (!demoMode && boostMult > 1 && P.launched && C.launched){
+  const dx = C.x - P.x, dz = C.z - P.z;
+  const d = Math.hypot(dx, dz);
+  if (d > 0.01){
+    const a = BOOST_PULL * (boostMult - 1) / Math.max(0.001, BOOST_MULT - 1) * sdt;
+    P.vx += (dx / d) * a; P.vz += (dz / d) * a;
+  }
+}
+
+// 序盤ブースト：発射直後の数秒だけ、両者を引き寄せる追加の力をかけて初接触を早める。
+// OPENING_TIME 秒かけて線形に減衰し、初接触した時点でも終了するため、
+// 中盤以降の物理（すり鉢の引力・摩擦・周回力・テンション等の基本定数）には影響しない
+if (!firstClash && fightTime < OPENING_TIME && P.launched && C.launched){
+  const dx = C.x - P.x, dz = C.z - P.z;
+  const d = Math.hypot(dx, dz);
+  if (d > 0.01){
+    const a = OPENING_PULL * (1 - fightTime / OPENING_TIME) * sdt;
+    P.vx += (dx / d) * a; P.vz += (dz / d) * a;
+    C.vx -= (dx / d) * a; C.vz -= (dz / d) * a;
+  }
+}
+
+// コマ同士の衝突
+if (P.launched && C.launched){
+  const dx = C.x - P.x, dz = C.z - P.z;
+  const dist = Math.hypot(dx, dz);
+  const minDist = P.stats.radius + C.stats.radius;
+  if (dist > 0.0001 && dist < minDist){
+    const nx = dx / dist, nz = dz / dist;
+    const mP = P.stats.mass;
+    const mC = C.stats.mass;
+    const invP = 1 / mP, invC = 1 / mC, invSum = invP + invC;
+    // めり込み解消
+    const overlap = minDist - dist;
+    P.x -= nx * overlap * (invP / invSum); P.z -= nz * overlap * (invP / invSum);
+    C.x += nx * overlap * (invC / invSum); C.z += nz * overlap * (invC / invSum);
+    // 接近している時だけインパルスとスピンダメージ
+    const rvn = (C.vx - P.vx) * nx + (C.vz - P.vz) * nz;
+    if (rvn < 0){
+      const jimp = -(1 + 0.9) * rvn / invSum;
+      P.vx -= jimp * invP * nx; P.vz -= jimp * invP * nz;
+      C.vx += jimp * invC * nx; C.vz += jimp * invC * nz;
+      // ノックバック強化：衝突の強さに比例した追加の押し出しで、
+      // ぶつかったコマ同士が目に見えて弾き合って離れるようにする。
+      // 追加する相対分離速度は push 本体（弱い接触で約0.9、強い衝突で約4.1）で、
+      // 質量の逆数比で両者へ配分する。土俵の物理定数には触れない
+      const strength = Math.min(1, Math.abs(rvn) / 9);
+      const push = 0.5 + 3.6 * strength;
+      P.vx -= nx * push * (invP / invSum); P.vz -= nz * push * (invP / invSum);
+      C.vx += nx * push * (invC / invSum); C.vz += nz * push * (invC / invSum);
+      const impact = 0.6 + Math.min(1.4, Math.abs(rvn) * 0.12);
+      // 接触点で演出（火花・衝撃波・シェイク・効果音）。強い衝突ではヒットストップも
+      triggerClashFX(P.x + nx * P.stats.radius, P.z + nz * P.stats.radius, strength, false);
+      if (strength > 0.5) addHitstop(0.06);
+      // 与ダメージは攻撃側の「こうげき」倍率だけで決まる（防御・トゲ等の特殊補正は廃止）
+      const dmg = atkF => Math.max(0.3, atkF.stats.atkMult * impact);
+      // スピンダメージは即時適用せず、タップ判定（resolvePendingClash）に委ねる
+      registerClash(dmg(C), dmg(P));
+    }
+  }
+}
+}
+
 function stepBattle(dt){
   const P = fighters.player, C = fighters.cpu;
   fightTime += dt;
@@ -1236,150 +1401,13 @@ function stepBattle(dt){
   }
 
   const boostMult = currentBoostMult();   // プレイヤーのブースト倍率（このフレームの値）
-  for (const f of [P, C]){
-    if (!f.launched) continue;
-    // このコマの速度スケール：両コマ共通のペース倍率 × そのコマ個別のスピード倍率
-    // ×（プレイヤーのみ）ブースト倍率
-    const spdScale = paceMult * f.stats.spdMult * (f === P ? boostMult : 1);
-    // スピン減衰（ステータスに依存しない一定値）
-    f.spin -= SPIN_DECAY * dt;
-    const d = Math.hypot(f.x, f.z);
-    // すり鉢効果：斜面に沿って中心へ引かれる（距離に比例。傾斜強化で係数2.4→3.0）
-    // 縁（ARENA_R）の外側では斜面が下向きに転じるので、外へ滑り落ちる力に切り替える
-    if (d > 0.01){
-      const a = d <= ARENA_R ? SLOPE_PULL * d : -4.4;
-      f.vx -= (f.x / d) * a * dt;
-      f.vz -= (f.z / d) * a * dt;
-    }
-    // 摩擦（旧0.5→0.22に弱めて、滑りが長続きするように）
-    const fr = Math.exp(-0.22 * dt);
-    f.vx *= fr; f.vz *= fr;
-    // 静止させない：進行方向を曲げて土俵を周回させる力＋最低速度の維持。
-    // 移動の挙動はスピン量に依存しない（スピン0＝瀕死でも今まで通り動き回る）。
-    // スピンが効くのは数値管理（ダメージ・減衰・瀕死判定）と
-    // 見た目のフラフラ（syncFighters 側）だけに限定する
-    {
-      const spd = Math.hypot(f.vx, f.vz);
-      if (spd > 0.05){
-        // 速度に垂直な向きの力（強さはスピン残量によらず一定）。両者とも時計回り
-        const px = -f.vz / spd, pz = f.vx / spd;
-        const drive = 1.15 * spdScale;
-        f.vx += px * f.orbit * drive * dt;
-        f.vz += pz * f.orbit * drive * dt;
-      }
-      if (spd < 0.55 * spdScale){
-        // 止まりそうになったら、土俵の接線方向へそっと押し出す
-        let tx, tz;
-        if (d > 0.3){ tx = (-f.z / d) * f.orbit; tz = (f.x / d) * f.orbit; }
-        else { tx = f.orbit; tz = 0; }
-        f.vx += tx * 2.4 * spdScale * dt;
-        f.vz += tz * 2.4 * spdScale * dt;
-      }
-    }
-    // 速度の上限（斜面加速での暴走防止）
-    {
-      const spd = Math.hypot(f.vx, f.vz);
-      const cap = 13 * spdScale;
-      if (spd > cap){ f.vx *= cap / spd; f.vz *= cap / spd; }
-    }
-    // ※フラつきの速度ノイズは廃止した（軌道を乱していたため）。
-    //   フラフラは syncFighters でメッシュの表示位置・傾きだけに付けている
-    f.x += f.vx * dt;
-    f.z += f.vz * dt;
-    // 縁のヘリ（常時ガードレール）：コマは決して場外に出ない。
-    // ヘリに到達したら位置を内側にクランプし、外向き（径方向）速度だけを
-    // 反発係数0.55で跳ね返す。接線成分は保持するので、周回の流れは止まらない
-    {
-      const dLip = Math.hypot(f.x, f.z);
-      if (dLip > LIP_R){
-        const nx = f.x / dLip, nz = f.z / dLip;
-        f.x = nx * LIP_R; f.z = nz * LIP_R;
-        const vr = f.vx * nx + f.vz * nz;   // 外向きの径方向速度
-        if (vr > 0){
-          f.vx -= (1 + 0.55) * vr * nx;
-          f.vz -= (1 + 0.55) * vr * nz;
-        }
-      }
-    }
-  }
-
-  // テンションによる引き寄せ（相殺が続くほど接近が速くなり、タップが難しくなる）
-  if (tension > 0 && P.launched && C.launched){
-    const dx = C.x - P.x, dz = C.z - P.z;
-    const d = Math.hypot(dx, dz);
-    if (d > 0.01){
-      const a = TENSION_PULL * Math.min(tension, TENSION_CAP) * dt;
-      P.vx += (dx / d) * a; P.vz += (dz / d) * a;
-      C.vx -= (dx / d) * a; C.vz -= (dz / d) * a;
-    }
-  }
-
-  // ブースト中の引き寄せ：プレイヤーのブーストで速度が上がっている間だけ、
-  // 自コマが相手方向へ強く引かれ、軌道が相手に向かってはっきり曲がる。
-  // 強さはブースト倍率の進み具合（(倍率-1)/(設定倍率-1)）に比例させるので、
-  // 維持・減衰フェーズでは弱まりながら消えていく
-  if (!demoMode && boostMult > 1 && P.launched && C.launched){
-    const dx = C.x - P.x, dz = C.z - P.z;
-    const d = Math.hypot(dx, dz);
-    if (d > 0.01){
-      const a = BOOST_PULL * (boostMult - 1) / (BOOST_MULT - 1) * dt;
-      P.vx += (dx / d) * a; P.vz += (dz / d) * a;
-    }
-  }
-
-  // 序盤ブースト：発射直後の数秒だけ、両者を引き寄せる追加の力をかけて初接触を早める。
-  // OPENING_TIME 秒かけて線形に減衰し、初接触した時点でも終了するため、
-  // 中盤以降の物理（すり鉢の引力・摩擦・周回力・テンション等の基本定数）には影響しない
-  if (!firstClash && fightTime < OPENING_TIME && P.launched && C.launched){
-    const dx = C.x - P.x, dz = C.z - P.z;
-    const d = Math.hypot(dx, dz);
-    if (d > 0.01){
-      const a = OPENING_PULL * (1 - fightTime / OPENING_TIME) * dt;
-      P.vx += (dx / d) * a; P.vz += (dz / d) * a;
-      C.vx -= (dx / d) * a; C.vz -= (dz / d) * a;
-    }
-  }
-
-  // コマ同士の衝突
-  if (P.launched && C.launched){
-    const dx = C.x - P.x, dz = C.z - P.z;
-    const dist = Math.hypot(dx, dz);
-    const minDist = P.stats.radius + C.stats.radius;
-    if (dist > 0.0001 && dist < minDist){
-      const nx = dx / dist, nz = dz / dist;
-      const mP = P.stats.mass;
-      const mC = C.stats.mass;
-      const invP = 1 / mP, invC = 1 / mC, invSum = invP + invC;
-      // めり込み解消
-      const overlap = minDist - dist;
-      P.x -= nx * overlap * (invP / invSum); P.z -= nz * overlap * (invP / invSum);
-      C.x += nx * overlap * (invC / invSum); C.z += nz * overlap * (invC / invSum);
-      // 接近している時だけインパルスとスピンダメージ
-      const rvn = (C.vx - P.vx) * nx + (C.vz - P.vz) * nz;
-      if (rvn < 0){
-        const jimp = -(1 + 0.9) * rvn / invSum;
-        P.vx -= jimp * invP * nx; P.vz -= jimp * invP * nz;
-        C.vx += jimp * invC * nx; C.vz += jimp * invC * nz;
-        // ノックバック強化：衝突の強さに比例した追加の押し出しで、
-        // ぶつかったコマ同士が目に見えて弾き合って離れるようにする。
-        // 追加する相対分離速度は push 本体（弱い接触で約0.9、強い衝突で約4.1）で、
-        // 質量の逆数比で両者へ配分する。土俵の物理定数には触れない
-        const strength = Math.min(1, Math.abs(rvn) / 9);
-        const push = 0.5 + 3.6 * strength;
-        P.vx -= nx * push * (invP / invSum); P.vz -= nz * push * (invP / invSum);
-        C.vx += nx * push * (invC / invSum); C.vz += nz * push * (invC / invSum);
-        const impact = 0.6 + Math.min(1.4, Math.abs(rvn) * 0.12);
-        // 接触点で演出（火花・衝撃波・シェイク・効果音）。強い衝突ではヒットストップも
-        triggerClashFX(P.x + nx * P.stats.radius, P.z + nz * P.stats.radius, strength, false);
-        if (strength > 0.5) addHitstop(0.06);
-        // 与ダメージは攻撃側の「こうげき」倍率だけで決まる（防御・トゲ等の特殊補正は廃止）
-        const dmg = atkF => Math.max(0.3, atkF.stats.atkMult * impact);
-        // スピンダメージは即時適用せず、タップ判定（resolvePendingClash）に委ねる
-        registerClash(dmg(C), dmg(P));
-      }
-    }
-  }
-
+  // サブステップ分割：高速移動時に相手をすり抜けて接触判定が飛ばないよう、
+  // 1サブステップあたりの移動量が接触距離の半分以下になるよう積分を分割する
+  const maxSpd = Math.max(Math.hypot(P.vx, P.vz), Math.hypot(C.vx, C.vz));
+  const contactDist = P.stats.radius + C.stats.radius;
+  const nSub = Math.min(48, Math.max(1, Math.ceil(maxSpd * dt / (contactDist * 0.5))));
+  const sdt = dt / nSub;
+  for (let sub = 0; sub < nSub; sub++) stepPhysics(sdt, boostMult);
   // 瀕死の記録：スピンが0になっても試合は終わらない（決着は次の接触で決まる）
   markDying();
   // 制限時間（保険）：残りスピンが多い方の勝ち。
