@@ -649,22 +649,66 @@ function buildTopMesh(sel, side){
     capMat.roughnessMap = ntex;
     capMat.bumpMap = ntex;
     capMat.bumpScale = 0.3;
-    // 分厚い帽子の縁に細かい突起（モジャモジャ）を多数付ける
-    const fringeMat = stdMat(0x4e3319, 1.0);
-    const M = 30;
-    const fringe = new THREE.InstancedMesh(new THREE.ConeGeometry(0.028, 0.20, 5), fringeMat, M);
+    // モジャモジャ：細長い棘を分厚い帽子（ドーム）の表面全体に多数生やす。
+    // 本物のクヌギの殻斗は鱗片の先が長く伸びて四方に跳ね、表面全体が毛羽立つ。
+    // 棘はドーム面全体に決定的乱数でばらまき（均等配置にしない）、向きは表面の
+    // 外向きを基準にランダムな傾き＋「外側〜下向きに垂れる」バイアス
+    // （被せ位置＝縁に近いほど強い）を加える。長さ・太さ・色にも個体差を付ける
+    const hairMat = stdMat(0x4e3319, 1.0);
+    const N = 150;
+    const hairs = new THREE.InstancedMesh(new THREE.ConeGeometry(1, 1, 5), hairMat, N);
+    // プロファイル各区間の「弧長×平均半径」（表面積に比例）で重み付けし、
+    // 棘の生える位置をドーム表面全体から選ぶ
+    const prof = pants.pts;
+    const segW = [];
+    let totalW = 0;
+    for (let i = 0; i < prof.length - 1; i++){
+      const w = Math.hypot(prof[i+1][0] - prof[i][0], prof[i+1][1] - prof[i][1])
+              * Math.max(0.12, (prof[i][0] + prof[i+1][0]) / 2);
+      segW.push(w); totalW += w;
+    }
+    const rng = makeRng(4613);
     const m4 = new THREE.Matrix4(), q = new THREE.Quaternion();
     const up = new THREE.Vector3(0, 1, 0);
-    for (let i = 0; i < M; i++){
-      const th = (i / M) * Math.PI * 2 + (i % 2) * 0.1;
-      const dir = new THREE.Vector3(Math.cos(th) * 0.75, -0.66, Math.sin(th) * 0.75).normalize();
-      const pos = new THREE.Vector3(Math.cos(th) * 1.06, 0.04, Math.sin(th) * 1.06);
+    const col = new THREE.Color();
+    for (let i = 0; i < N; i++){
+      let s = rng() * totalW, seg = 0;
+      while (seg < segW.length - 1 && s > segW[seg]){ s -= segW[seg]; seg++; }
+      const r1 = prof[seg][0], y1 = prof[seg][1];
+      const r2 = prof[seg+1][0], y2 = prof[seg+1][1];
+      const tt = Math.min(1, s / segW[seg]);   // 区間内では重みが位置に比例する
+      const r = r1 + (r2 - r1) * tt, y = y1 + (y2 - y1) * tt;
+      // 区間方向 (dr, dy) に対する外向き法線は (dy, -dr)
+      let nr = y2 - y1, ny = -(r2 - r1);
+      const nl = Math.hypot(nr, ny) || 1; nr /= nl; ny /= nl;
+      const th = rng() * Math.PI * 2;
+      const ct = Math.cos(th), stn = Math.sin(th);
+      const pos = new THREE.Vector3(r * ct, y, r * stn);
+      const dir = new THREE.Vector3(nr * ct, ny, nr * stn);
+      // 垂れバイアス：縁（y が小さい）に近いほど外向き＋下向きに寝かせる
+      const droop = Math.min(0.8, Math.max(0.15, 0.85 - y * 1.1));
+      dir.y -= droop;
+      dir.x += ct * droop * 0.6;
+      dir.z += stn * droop * 0.6;
+      // ランダムな傾き：法線と直交するランダム軸まわりに最大0.55 radほど倒す
+      const ax = new THREE.Vector3(rng() - 0.5, rng() - 0.5, rng() - 0.5).cross(dir);
+      if (ax.lengthSq() > 1e-6) dir.applyAxisAngle(ax.normalize(), (rng() - 0.3) * 0.55);
+      dir.normalize();
+      // 長さ・太さの個体差（縁に近いほど長め。最長で帽子半径の3割弱）
+      const len = (0.12 + rng() * 0.12) * (1 + droop * 0.4);
+      const thick = 0.013 + rng() * 0.011;
+      const center = pos.clone().addScaledVector(dir, len * 0.38);   // 根元を少し埋める
       q.setFromUnitVectors(up, dir);
-      m4.compose(pos, q, new THREE.Vector3(1, 1, 1));
-      fringe.setMatrixAt(i, m4);
+      m4.compose(center, q, new THREE.Vector3(thick, len, thick));
+      hairs.setMatrixAt(i, m4);
+      // 色の個体差：濃茶の範囲で明暗と色味をばらつかせる（マテリアル色に乗算される）
+      const v = 0.72 + rng() * 0.45;
+      col.setRGB(v, v * (0.90 + rng() * 0.14), v * (0.82 + rng() * 0.14));
+      hairs.setColorAt(i, col);
     }
-    fringe.castShadow = true;
-    capG.add(fringe);
+    if (hairs.instanceColor) hairs.instanceColor.needsUpdate = true;
+    hairs.castShadow = true;
+    capG.add(hairs);
   }
   bodyG.add(capG);
 
@@ -714,7 +758,7 @@ function buildTopMesh(sel, side){
   shaft.castShadow = true;
   spinG.add(shaft);
 
-  // 瀕死サイン用：本体の全マテリアル（実・帽子・イガの棘・トゲトゲの縁など）と元の色を覚えておく
+  // 瀕死サイン用：本体の全マテリアル（実・帽子・イガの棘・トゲトゲの棘など）と元の色を覚えておく
   root.userData.blink = blink;
   root.userData.spinG = spinG;
   return root;
