@@ -47,6 +47,8 @@
     box-shadow:0 -6px 24px rgba(110,69,32,.18); max-height:54%; overflow-y:auto;
   }
   .group-label{ font-size:12px; font-weight:700; color:#9a7748; margin:10px 0 5px; letter-spacing:.08em; }
+  .num-input{ font:inherit; font-size:14px; padding:8px 12px; width:110px; border-radius:999px;
+    background:#fffdf6; color:var(--ink); border:2px solid var(--line); }
   .chips{ display:flex; gap:8px; flex-wrap:wrap; }
   .chip{
     font:inherit; font-size:14px; padding:8px 14px; border-radius:999px; cursor:pointer;
@@ -161,6 +163,8 @@
     <div class="chips" id="chips-option"></div>
     <div class="group-label">難易度</div>
     <div class="chips" id="chips-difficulty"></div>
+    <div class="group-label">ブースト倍率（デバッグ）</div>
+    <div class="chips"><input type="number" id="boost-mult-input" class="num-input" value="4.0" step="0.5" min="0.5" max="20"></div>
     <button id="battle-btn" class="btn">バトル開始</button>
   </div>
 </div>
@@ -419,7 +423,7 @@ const DRAW_KB_RATE = 0.25;  // 相殺1回ごとに相殺ノックバックが増
 const PACE_STEP = 0.10;     // 相殺1回ごとのペース倍率の上昇（+10%）
 const PACE_CAP = 2.0;       // ペース倍率の上限
 /* --- ブーストボタン（プレイヤー専用） --- */
-const BOOST_MULT = 4.0;     // ブースト中の速度倍率（ゲージ制限の導入に合わせ 2.0→4.0 に引き上げ）
+let BOOST_MULT = 4.0;       // ブースト中の速度倍率（ゲージ制限の導入に合わせ 2.0→4.0 に引き上げ）。組み立て画面のデバッグ入力で上書きされる
 const BOOST_KEEP = 1.5;     // ボタンを離した後もブースト速度を維持する秒数
 const BOOST_FADE = 1.0;     // その後、通常速度へ戻るまでにかける秒数
 const BOOST_DMG = 2;        // ブースト受付時間内にジャストの勝敗がついたときのダメージ倍率
@@ -427,6 +431,7 @@ const BOOST_DMG_WINDOW = 0.3;  // ダメージ倍率が有効な受付時間（�
 const BOOST_GAUGE_MAX = 5.0;   // ブーストゲージの容量（ブースト使用できる秒数）
 const BOOST_RECOVER_RATE = 1.5;  // ゲージ回復の遅さ（減った分のこの倍の時間をかけて戻る）
 const BOOST_COOLDOWN = 1.0;    // ゲージがMaxに戻ってから再使用できるまでの秒数
+const BOOST_PULL = 6.0;        // ブースト中の引き寄せ加速度（フルブースト時・相手方向。テンション最大4.0や序盤ブースト1.5より強い）
 /* スタート方式：時計の文字盤の位置から、目標の時計位置へ真っ直ぐ発射する直進ダッシュ。
    プレイヤーは7時→11時（左側を上がる）、CPUは1時→5時（右側を下がる）で、
    直進＋すり鉢の傾斜＋周回力が合わさって時計回りの流れになる */
@@ -567,11 +572,11 @@ for (let i = 0; i < 6; i++){
   battleScene.add(m);
   ringPool.push({ mesh: m, t: 0, dur: 0.4, maxR: 2, active: false });
 }
-function spawnRing(x, z, strength, just){
+function spawnRing(x, z, strength, just, colorHex){
   const r = ringPool.find(r => !r.active) || ringPool[0];
   const d = Math.hypot(x, z);
   r.mesh.position.set(x, bowlY(Math.min(d, ARENA_R)) + 0.07, z);
-  r.mesh.material.color.setHex(just ? 0xffd34d : 0xffe2a0);
+  r.mesh.material.color.setHex(colorHex ?? (just ? 0xffd34d : 0xffe2a0));
   r.t = 0; r.active = true; r.mesh.visible = true;
   r.dur = 0.34 + strength * 0.16;
   r.maxR = 1.5 + strength * 2.3 + (just ? 0.9 : 0);
@@ -586,6 +591,163 @@ function updateRings(dt){
     r.mesh.scale.set(s, s, s);
     r.mesh.material.opacity = 0.8 * (1 - k);
   }
+}
+
+/* --- 衝撃バースト（カメラ向きスプライト。色でジャストの勝敗を伝える） ---
+   テクスチャは Canvas でプロシージャル生成した白基調の放射バースト。
+   SpriteMaterial の color で着色するので、色違いは同じテクスチャを使い回す。
+   青＝プレイヤーのジャスト成功／赤＝CPUのジャスト成功（プレイヤー失敗）／
+   黄＝相殺（派手さ控えめ）。ブーストアタック成功時は特大＋二重＋リング追加 */
+function makeBurstTexture(){
+  const S = 256;
+  const cv = document.createElement('canvas'); cv.width = cv.height = S;
+  const g = cv.getContext('2d');
+  const cx = S / 2, cy = S / 2;
+  // 中心の閃光（放射グラデーション）
+  const grad = g.createRadialGradient(cx, cy, 0, cx, cy, S / 2);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.16, 'rgba(255,255,255,0.9)');
+  grad.addColorStop(0.42, 'rgba(255,255,255,0.28)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, S, S);
+  // 放射状の streaks（細長い光の筋）
+  g.globalCompositeOperation = 'lighter';
+  const N = 30;
+  for (let i = 0; i < N; i++){
+    const th = (i / N) * Math.PI * 2 + (Math.random() - 0.5) * 0.3;
+    const len = S * 0.5 * (0.4 + Math.random() * 0.6);
+    const lg = g.createLinearGradient(cx, cy, cx + Math.cos(th) * len, cy + Math.sin(th) * len);
+    lg.addColorStop(0, 'rgba(255,255,255,0.95)');
+    lg.addColorStop(1, 'rgba(255,255,255,0)');
+    g.strokeStyle = lg;
+    g.lineWidth = 2 + Math.random() * 5;
+    g.lineCap = 'round';
+    g.beginPath();
+    g.moveTo(cx, cy);
+    g.lineTo(cx + Math.cos(th) * len, cy + Math.sin(th) * len);
+    g.stroke();
+  }
+  return new THREE.CanvasTexture(cv);
+}
+const BURST_MAX = 8;
+const burstPool = [];
+{
+  const burstTex = makeBurstTexture();
+  for (let i = 0; i < BURST_MAX; i++){
+    const mat = new THREE.SpriteMaterial({ map: burstTex, transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false });
+    const sp = new THREE.Sprite(mat);   // Sprite は常時カメラを向く（ビルボード）
+    sp.visible = false;
+    battleScene.add(sp);
+    burstPool.push({ sp, mat, t: 0, dur: 0.25, from: 1, to: 2.2, maxOp: 0.95, active: false });
+  }
+}
+function spawnBurst(x, z, colorHex, opts = {}){
+  const b = burstPool.find(b => !b.active) || burstPool[0];
+  const d = Math.hypot(x, z);
+  b.sp.position.set(x, bowlY(Math.min(d, ARENA_R)) + 0.75, z);
+  b.mat.color.setHex(colorHex);
+  b.dur   = opts.dur   ?? 0.25;
+  b.from  = opts.from  ?? 1.0;
+  b.to    = opts.to    ?? 2.3;
+  b.maxOp = opts.opacity ?? 0.95;
+  b.t = -(opts.delay ?? 0);
+  b.active = true;
+  b.sp.visible = b.t >= 0;
+  b.sp.scale.set(b.from, b.from, 1);
+  b.mat.opacity = b.maxOp;
+}
+function updateBursts(dt){
+  for (const b of burstPool){
+    if (!b.active) continue;
+    b.t += dt;
+    if (b.t < 0) continue;   // 遅延待ち（二重バーストの2発目）
+    b.sp.visible = true;
+    const k = b.t / b.dur;
+    if (k >= 1){ b.active = false; b.sp.visible = false; continue; }
+    const e = 1 - (1 - k) * (1 - k);   // 最初速く広がる
+    const s = b.from + (b.to - b.from) * e;
+    b.sp.scale.set(s, s, 1);
+    b.mat.opacity = b.maxOp * Math.pow(1 - k, 1.4);
+  }
+}
+
+/* プレイヤーのジャスト成功バースト（青）。ブーストアタック成功時（boostRisk）
+   はさらに派手に：大きく・長く＋二重バースト＋青い衝撃波リングを重ねる */
+function spawnJustBurst(x, z, boostRisk){
+  if (boostRisk){
+    spawnBurst(x, z, 0x3fa9ff, { from: 1.5, to: 3.6, dur: 0.45, opacity: 1.0 });
+    spawnBurst(x, z, 0x9fd8ff, { from: 1.0, to: 2.7, dur: 0.4, opacity: 0.9, delay: 0.07 });
+    spawnRing(x, z, 1.0, true, 0x3fa9ff);
+    spawnRing(x, z, 0.6, true, 0x9fd8ff);
+  } else {
+    spawnBurst(x, z, 0x3fa9ff);
+  }
+}
+
+/* --- ブースト中の渦パーティクル（軸の接地点から渦巻いて上昇し、コマを包む） ---
+   プール管理の Points。基部はプレイヤーの現在位置に追随し、粒子は高速で
+   回転しながら上昇して消える。色は白〜水色系、加算ブレンド */
+const VORTEX_MAX = 110;
+const vortexPos = new Float32Array(VORTEX_MAX * 3);
+const vortexCol = new Float32Array(VORTEX_MAX * 3);
+const vortexDat = [];
+for (let i = 0; i < VORTEX_MAX; i++){
+  vortexPos[i * 3 + 1] = -999;
+  vortexDat.push({ ang: 0, rad: 0.2, h: 0, va: 10, vh: 2, life: 0, maxLife: 1 });
+}
+const vortexGeo = new THREE.BufferGeometry();
+vortexGeo.setAttribute('position', new THREE.BufferAttribute(vortexPos, 3));
+vortexGeo.setAttribute('color', new THREE.BufferAttribute(vortexCol, 3));
+const vortexPoints = new THREE.Points(vortexGeo, new THREE.PointsMaterial({
+  size: 0.13, vertexColors: true, transparent: true,
+  blending: THREE.AdditiveBlending, depthWrite: false,
+}));
+vortexPoints.frustumCulled = false;
+battleScene.add(vortexPoints);
+let vortexCursor = 0, vortexAcc = 0;
+
+function updateVortex(dt){
+  const P = fighters && fighters.player;
+  const active = !demoMode && phase === 'fight' && P && P.launched && currentBoostMult() > 1;
+  if (active){
+    vortexAcc += dt * 55;   // 毎秒約55個スポーン（プール110個・寿命0.6〜0.9秒で常時60個前後）
+    while (vortexAcc >= 1){
+      vortexAcc -= 1;
+      const d = vortexDat[vortexCursor]; vortexCursor = (vortexCursor + 1) % VORTEX_MAX;
+      d.ang = Math.random() * Math.PI * 2;
+      d.rad = 0.14 + Math.random() * 0.28;
+      d.h = 0;
+      d.va = 9 + Math.random() * 7;      // 角速度（rad/s）。接地点で高速回転
+      d.vh = 1.6 + Math.random() * 1.0;  // 上昇速度。寿命と合わせて高さ1.2前後まで届く
+      d.maxLife = d.life = 0.6 + Math.random() * 0.3;
+    }
+  }
+  const bx = P ? P.x : 0, bz = P ? P.z : 0;
+  const by = P ? bowlY(Math.min(Math.hypot(bx, bz), ARENA_R + 0.6)) : 0;
+  for (let i = 0; i < VORTEX_MAX; i++){
+    const d = vortexDat[i];
+    if (d.life <= 0) continue;
+    d.life -= dt;
+    if (d.life <= 0){
+      vortexPos[i * 3 + 1] = -999;
+      vortexCol[i * 3] = vortexCol[i * 3 + 1] = vortexCol[i * 3 + 2] = 0;
+      continue;
+    }
+    d.ang += d.va * dt;
+    d.h += d.vh * dt;
+    const rr = d.rad * (1 + d.h * 0.5);   // 上に行くほど少し広がる
+    vortexPos[i * 3]     = bx + Math.cos(d.ang) * rr;
+    vortexPos[i * 3 + 1] = by + 0.05 + d.h;
+    vortexPos[i * 3 + 2] = bz + Math.sin(d.ang) * rr;
+    const k = d.life / d.maxLife;
+    vortexCol[i * 3]     = 0.72 * k;   // 白〜水色系
+    vortexCol[i * 3 + 1] = 0.90 * k;
+    vortexCol[i * 3 + 2] = 1.00 * k;
+  }
+  vortexGeo.attributes.position.needsUpdate = true;
+  vortexGeo.attributes.color.needsUpdate = true;
 }
 
 /* --- 画面シェイクとヒットストップ --- */
@@ -659,6 +821,8 @@ function triggerClashFX(x, z, strength, just){
 function updateFX(dt){
   updateSparks(dt);
   updateRings(dt);
+  updateBursts(dt);
+  updateVortex(dt);
 }
 
 /* ================= 画面遷移 ================= */
@@ -754,6 +918,14 @@ function buildDifficultyChips(){
   }
 }
 buildDifficultyChips();
+
+/* --- ブースト倍率のデバッグ入力（セッション中は入力値が BOOST_MULT に反映される） --- */
+const boostMultInput = document.getElementById('boost-mult-input');
+boostMultInput.addEventListener('input', () => {
+  const v = parseFloat(boostMultInput.value);
+  if (Number.isFinite(v) && v > 0) BOOST_MULT = v;
+});
+
 refreshPreview();
 
 document.getElementById('play-btn').addEventListener('click', () => { ensureAudio(); showScreen('build'); });
@@ -968,8 +1140,12 @@ function resolvePendingClash(){
       // 両者とも瀕死で両方失敗：先に瀕死になった方（dyingSeqが小さい方）の負け
       return endBattle(P.dyingSeq > C.dyingSeq, 'finish');
     }
-    if (pFail) return endBattle(false, 'finish');
-    if (cFail) return endBattle(true, 'finish');
+    if (pFail){ spawnBurst(P.x, P.z, 0xff4040); return endBattle(false, 'finish'); }
+    if (cFail){
+      // プレイヤーがジャスト成功してとどめを刺した場合は青（ブースト中なら特大）
+      if (pOK) spawnJustBurst(C.x, C.z, boostRisk);
+      return endBattle(true, 'finish');
+    }
     if (P.dying) reviveFighter(P);
     if (C.dying) reviveFighter(C);
   }
@@ -1016,6 +1192,9 @@ function resolvePendingClash(){
       C.vx *= kick; C.vz *= kick;
     }
     triggerClashFX((P.x + C.x) / 2, (P.z + C.z) / 2, 0.55, true);
+    // 相殺のバーストは黄色で派手さ控えめ（小さめ・薄め・短め）
+    spawnBurst((P.x + C.x) / 2, (P.z + C.z) / 2, 0xffd34d,
+      { from: 0.8, to: 1.6, dur: 0.22, opacity: 0.55 });
     addHitstop(0.06);
     showClash('draw', '相殺！');
   } else if (pOK){
@@ -1023,6 +1202,7 @@ function resolvePendingClash(){
     C.spin -= pc.dmgToC * CLASH_WIN_DMG * (boostRisk ? BOOST_DMG : 1);
     pushLoser(C, P);
     triggerClashFX(C.x, C.z, 0.85, true);
+    spawnJustBurst(C.x, C.z, boostRisk);   // プレイヤーのジャスト成功＝青
     addHitstop(0.08);
     showClash('good', 'ジャスト！');
   } else if (cOK){
@@ -1030,6 +1210,7 @@ function resolvePendingClash(){
     P.spin -= pc.dmgToP * CLASH_WIN_DMG * (boostRisk ? BOOST_DMG : 1);
     pushLoser(P, C);
     triggerClashFX(P.x, P.z, 0.85, true);
+    spawnBurst(P.x, P.z, 0xff4040);   // CPUのジャスト成功（プレイヤー失敗）＝赤
     addHitstop(0.08);
     showClash('bad', '失敗…');
   } else {
@@ -1130,6 +1311,19 @@ function stepBattle(dt){
       const a = TENSION_PULL * Math.min(tension, TENSION_CAP) * dt;
       P.vx += (dx / d) * a; P.vz += (dz / d) * a;
       C.vx -= (dx / d) * a; C.vz -= (dz / d) * a;
+    }
+  }
+
+  // ブースト中の引き寄せ：プレイヤーのブーストで速度が上がっている間だけ、
+  // 自コマが相手方向へ強く引かれ、軌道が相手に向かってはっきり曲がる。
+  // 強さはブースト倍率の進み具合（(倍率-1)/(設定倍率-1)）に比例させるので、
+  // 維持・減衰フェーズでは弱まりながら消えていく
+  if (!demoMode && boostMult > 1 && P.launched && C.launched){
+    const dx = C.x - P.x, dz = C.z - P.z;
+    const d = Math.hypot(dx, dz);
+    if (d > 0.01){
+      const a = BOOST_PULL * (boostMult - 1) / (BOOST_MULT - 1) * dt;
+      P.vx += (dx / d) * a; P.vz += (dz / d) * a;
     }
   }
 
