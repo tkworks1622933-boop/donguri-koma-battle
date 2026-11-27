@@ -220,10 +220,28 @@ const AXES = {
   short:  { name:'ショート', len:0.62, r:0.050, mass:0.95, st:{ atk:2, hp:2, spd:8 } },
   fat:    { name:'ふと軸',   len:1.0,  r:0.105, mass:1.30, st:{ atk:8, hp:2, spd:2 } },
 };
+/* 本体は実在のどんぐり5種。nutPts/capPts は単位空間（高さ1.40）の回転体プロファイル。
+   capKind: 'scales'=ウロコ模様の帽子（コナラ） / 'shaggy'=縁がモジャモジャの分厚い帽子（クヌギ） /
+            'iga'=棘だらけの殻（クリ） / 'small'=小さく浅い帽子（マテバシイ・スダジイ） */
 const BODIES = {
-  maru: { name:'まる型', sx:1.00, sy:1.00, mass:1.00, st:{ atk:6, hp:6, spd:6 } },
-  hoso: { name:'ほそ型', sx:0.82, sy:1.30, mass:0.80, st:{ atk:3, hp:3, spd:12 } },
-  hira: { name:'ひら型', sx:1.16, sy:0.60, mass:1.10, st:{ atk:8, hp:8, spd:2 } },
+  konara: { name:'コナラ', sx:1.00, sy:1.00, mass:1.00, st:{ atk:6, hp:6, spd:6 },
+    nutCol:0xb57a38, capCol:0x7a5230, nutRough:0.60, capKind:'scales',
+    nutPts:[[0.001,0.00],[0.30,0.02],[0.55,0.08],[0.78,0.22],[0.92,0.42],[0.99,0.62],[1.00,0.78],[0.94,0.92],[0.82,1.00]],
+    capPts:[[0.84,0.97],[0.97,1.03],[1.01,1.12],[0.95,1.22],[0.78,1.30],[0.52,1.36],[0.24,1.39],[0.001,1.40]] },
+  kunugi: { name:'クヌギ', sx:1.14, sy:0.78, mass:1.15, st:{ atk:5, hp:8, spd:5 },
+    nutCol:0xa5712f, capCol:0x5d4020, nutRough:0.70, capKind:'shaggy',
+    nutPts:[[0.001,0.00],[0.34,0.02],[0.62,0.07],[0.85,0.18],[0.97,0.36],[1.00,0.55],[0.97,0.72],[0.86,0.84],[0.70,0.90]],
+    capPts:[[0.72,0.86],[0.90,0.90],[1.00,0.98],[1.02,1.08],[0.96,1.20],[0.80,1.31],[0.55,1.37],[0.26,1.395],[0.001,1.40]] },
+  kuri: { name:'クリ', sx:1.02, sy:0.95, mass:1.05, st:{ atk:8, hp:4, spd:6 },
+    nutCol:0x6e3f1d, capCol:0x86662c, nutRough:0.35, capKind:'iga' },
+  matebashii: { name:'マテバシイ', sx:0.80, sy:1.32, mass:0.80, st:{ atk:3, hp:3, spd:12 },
+    nutCol:0xc08b4a, capCol:0x8a6136, nutRough:0.25, capKind:'small',
+    nutPts:[[0.001,0.00],[0.22,0.03],[0.45,0.10],[0.68,0.24],[0.84,0.44],[0.93,0.66],[0.95,0.86],[0.90,1.02],[0.78,1.12],[0.60,1.17]],
+    capPts:[[0.62,1.14],[0.78,1.17],[0.86,1.23],[0.84,1.30],[0.70,1.35],[0.45,1.385],[0.001,1.40]] },
+  sudajii: { name:'スダジイ', sx:0.88, sy:1.12, mass:0.90, st:{ atk:6, hp:4, spd:8 },
+    nutCol:0x7c4a22, capCol:0x66452a, nutRough:0.30, capKind:'small',
+    nutPts:[[0.001,0.00],[0.10,0.02],[0.30,0.07],[0.55,0.18],[0.76,0.36],[0.89,0.58],[0.94,0.78],[0.92,0.94],[0.82,1.05],[0.64,1.12]],
+    capPts:[[0.66,1.09],[0.82,1.13],[0.90,1.20],[0.86,1.29],[0.68,1.35],[0.40,1.39],[0.001,1.40]] },
 };
 const OPTIONS = {
   none:  { name:'なし',   mass:1.00, shift:null },
@@ -268,11 +286,41 @@ function calcStats(sel){
 }
 
 /* ================= コマの3Dモデル ================= */
-const COL = {
-  player: { nut:0xc07a35, cap:0x71461f },
-  cpu:    { nut:0x8aa653, cap:0x5f7434 },
-  shaft: 0xe8cf9f,
-};
+const SHAFT_COL = 0xe8cf9f;
+
+/* 種ごとの色をサイドに合わせて調整する：プレイヤーは種本来の色、
+   CPUは緑寄りに寄せて見分けがつくようにする（種同士の明暗関係は保たれる） */
+function sideColor(hex, side){
+  const c = new THREE.Color(hex);
+  if (side === 'cpu'){ c.r *= 0.70; c.g *= 1.04; c.b *= 0.52; }
+  return c;
+}
+
+/* コナラの帽子用：ウロコ模様のテクスチャ（Canvasで生成、使い回す） */
+let _scaleTex = null;
+function scaleTexture(){
+  if (_scaleTex) return _scaleTex;
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = 256;
+  const g = cv.getContext('2d');
+  g.fillStyle = '#f4f4f4'; g.fillRect(0, 0, 256, 256);
+  const rows = 8, cols = 8, w = 256 / cols, h = 256 / rows;
+  for (let r = 0; r < rows; r++){
+    for (let c = 0; c < cols; c++){
+      const x = c * w + (r % 2 ? w / 2 : 0), y = r * h;
+      g.beginPath();
+      g.arc(x, y + h * 0.2, w * 0.60, 0, Math.PI, false);
+      g.fillStyle = (r + c) % 2 ? '#d8d8d8' : '#e7e7e7';
+      g.fill();
+      g.strokeStyle = '#9d9d9d'; g.lineWidth = 2.5; g.stroke();
+    }
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(3, 2);
+  _scaleTex = tex;
+  return tex;
+}
 
 function latheFrom(pts, mat){
   const v = pts.map(p => new THREE.Vector2(p[0], p[1]));
@@ -284,32 +332,90 @@ function latheFrom(pts, mat){
 /* 原点＝軸の先端（下端）。spinGroup が回転し、root が位置と傾きを持つ */
 function buildTopMesh(sel, side){
   const axis = AXES[sel.axis], body = BODIES[sel.body], opt = sel.option;
-  const colors = COL[side];
   const root = new THREE.Group();
   const spinG = new THREE.Group();
   root.add(spinG);
 
-  const nutMat  = new THREE.MeshStandardMaterial({ color:colors.nut, roughness:0.65 });
-  const capMat  = new THREE.MeshStandardMaterial({ color:colors.cap, roughness:0.95 });
+  // 本体のマテリアルは全て blink（瀕死の赤点滅）対象として登録する
+  const blink = [];
+  const stdMat = (hex, rough, extra = {}) => {
+    const m = new THREE.MeshStandardMaterial({ color: sideColor(hex, side), roughness: rough, ...extra });
+    blink.push({ mat: m, base: m.color.clone() });
+    return m;
+  };
+  const nutMat = stdMat(body.nutCol, body.nutRough);
+  const capMat = stdMat(body.capCol, 0.95);
   const bodyH = 1.40 * body.sy;
   const below = 0.5 * axis.len;   // 本体より下に出る軸の長さ
 
-  // 本体（どんぐり）: 実＋帽子＋へた
+  // 本体（どんぐり）：種ごとに輪郭と帽子（殻斗）の作りを変える
   const bodyG = new THREE.Group();
   bodyG.position.y = below;
   bodyG.scale.set(body.sx, body.sy, body.sx);
-  const nut = latheFrom([
-    [0.001,0.00],[0.30,0.02],[0.55,0.08],[0.78,0.22],[0.92,0.42],
-    [0.99,0.62],[1.00,0.78],[0.94,0.92],[0.82,1.00],
-  ], nutMat);
-  const cap = latheFrom([
-    [0.84,0.97],[0.97,1.03],[1.01,1.12],[0.95,1.22],[0.78,1.30],
-    [0.52,1.36],[0.24,1.39],[0.001,1.40],
-  ], capMat);
   const stem = new THREE.Mesh(
     new THREE.CylinderGeometry(0.05, 0.065, 0.24, 8), capMat);
   stem.position.set(0.03, 1.46, 0); stem.rotation.z = 0.18; stem.castShadow = true;
-  bodyG.add(nut, cap, stem);
+
+  if (body.capKind === 'iga'){
+    // クリ：下部に実が少し覗き、大部分は棘だらけのイガ（殻）に覆われる
+    const peek = latheFrom([
+      [0.001,0.00],[0.30,0.02],[0.52,0.08],[0.66,0.18],[0.70,0.30],
+    ], nutMat);
+    const husk = latheFrom([
+      [0.001,0.16],[0.40,0.20],[0.68,0.30],[0.88,0.48],[0.98,0.70],
+      [0.99,0.90],[0.90,1.08],[0.72,1.22],[0.45,1.33],[0.001,1.38],
+    ], capMat);
+    bodyG.add(peek, husk, stem);
+    // 棘：フィボナッチ球で均等配置（InstancedMeshで1オブジェクトにまとめる）
+    const spikeMat = stdMat(0x74551f, 1.0);
+    const N = 120;
+    const spikes = new THREE.InstancedMesh(new THREE.ConeGeometry(0.035, 0.22, 6), spikeMat, N);
+    const m4 = new THREE.Matrix4(), q = new THREE.Quaternion();
+    const up = new THREE.Vector3(0, 1, 0), center = new THREE.Vector3(0, 0.78, 0);
+    let placed = 0;
+    for (let i = 0; i < N * 3 && placed < N; i++){
+      const yy = 1 - (i / (N * 3 - 1)) * 2;        // 1 → -1
+      if (yy < -0.45) continue;                    // 下部（実が覗く部分）には生やさない
+      const rr = Math.sqrt(Math.max(0, 1 - yy * yy));
+      const th = i * 2.399963;                     // 黄金角
+      const dir = new THREE.Vector3(Math.cos(th) * rr, yy, Math.sin(th) * rr);
+      const pos = new THREE.Vector3(dir.x * 0.97, center.y + dir.y * 0.60, dir.z * 0.97);
+      q.setFromUnitVectors(up, pos.clone().sub(center).normalize());
+      m4.compose(pos, q, new THREE.Vector3(1, 1, 1));
+      spikes.setMatrixAt(placed++, m4);
+    }
+    spikes.count = placed;
+    spikes.castShadow = true;
+    bodyG.add(spikes);
+  } else {
+    const nut = latheFrom(body.nutPts, nutMat);
+    const cap = latheFrom(body.capPts, capMat);
+    bodyG.add(nut, cap, stem);
+    if (body.capKind === 'scales'){
+      // コナラ：帽子にウロコ模様（色の濃淡＋凹凸）
+      const tex = scaleTexture();
+      capMat.map = tex;
+      capMat.bumpMap = tex;
+      capMat.bumpScale = 0.2;
+    } else if (body.capKind === 'shaggy'){
+      // クヌギ：分厚い帽子の縁に細かい突起（モジャモジャ）を多数付ける
+      const fringeMat = stdMat(0x4e3319, 1.0);
+      const M = 30;
+      const fringe = new THREE.InstancedMesh(new THREE.ConeGeometry(0.028, 0.20, 5), fringeMat, M);
+      const m4 = new THREE.Matrix4(), q = new THREE.Quaternion();
+      const up = new THREE.Vector3(0, 1, 0);
+      for (let i = 0; i < M; i++){
+        const th = (i / M) * Math.PI * 2 + (i % 2) * 0.1;
+        const dir = new THREE.Vector3(Math.cos(th) * 0.75, -0.66, Math.sin(th) * 0.75).normalize();
+        const pos = new THREE.Vector3(Math.cos(th) * 1.00, 0.95, Math.sin(th) * 1.00);
+        q.setFromUnitVectors(up, dir);
+        m4.compose(pos, q, new THREE.Vector3(1, 1, 1));
+        fringe.setMatrixAt(i, m4);
+      }
+      fringe.castShadow = true;
+      bodyG.add(fringe);
+    }
+  }
 
   // オプションパーツ（本体グループ内なので形に追随する）
   if (opt === 'toge'){
@@ -344,16 +450,13 @@ function buildTopMesh(sel, side){
   const shaftLen = below + bodyH + above;
   const shaft = new THREE.Mesh(
     new THREE.CylinderGeometry(axis.r, axis.r * 0.8, shaftLen, 10),
-    new THREE.MeshStandardMaterial({ color:COL.shaft, roughness:0.8 }));
+    new THREE.MeshStandardMaterial({ color:SHAFT_COL, roughness:0.8 }));
   shaft.position.y = shaftLen / 2;
   shaft.castShadow = true;
   spinG.add(shaft);
 
-  // 瀕死サイン用：本体（実と帽子）のマテリアルと元の色を覚えておく
-  root.userData.blink = [
-    { mat: nutMat, base: new THREE.Color(colors.nut) },
-    { mat: capMat, base: new THREE.Color(colors.cap) },
-  ];
+  // 瀕死サイン用：本体の全マテリアル（実・帽子・イガの棘・クヌギの縁など）と元の色を覚えておく
+  root.userData.blink = blink;
   root.userData.spinG = spinG;
   return root;
 }
@@ -843,7 +946,7 @@ function showScreen(name){
 }
 
 /* ================= 組み立て画面 ================= */
-const selection = { axis:'normal', body:'maru', option:'none' };
+const selection = { axis:'normal', body:'konara', option:'none' };
 let previewTop = null;
 
 function refreshPreview(){
