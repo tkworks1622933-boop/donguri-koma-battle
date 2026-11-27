@@ -204,11 +204,12 @@
 </div>
 
 <script type="importmap">
-{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
 </script>
 
 <script type="module">
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 /* ================= パーツ定義 =================
    st: こうげき(atk) / たいりょく(hp) / スピード(spd) への寄与。
@@ -237,10 +238,10 @@ const BODIES = {
     nutCol:0xb57a38, nutRough:0.60, capY:0.88, capR:0.97,
     nutPts:[[0.001,0.00],[0.30,0.02],[0.55,0.08],[0.78,0.22],[0.92,0.42],[0.99,0.62],[1.00,0.78],[0.94,0.92],[0.82,1.00]] },
   futo: { name:'太', sx:1.14, sy:0.78, mass:1.15, st:{ atk:5, hp:8, spd:5 },
-    nutCol:0xa5712f, nutRough:0.70, capY:0.76, capR:0.95,
+    nutCol:0x9e6527, nutRough:0.70, capY:0.76, capR:0.95,
     nutPts:[[0.001,0.00],[0.34,0.02],[0.62,0.07],[0.85,0.18],[0.97,0.36],[1.00,0.55],[0.97,0.72],[0.86,0.84],[0.70,0.90]] },
   hoso: { name:'細', sx:0.80, sy:1.32, mass:0.80, st:{ atk:3, hp:3, spd:12 },
-    nutCol:0xc08b4a, nutRough:0.25, capY:1.02, capR:0.92,
+    nutCol:0xc99047, nutRough:0.25, capY:1.02, capR:0.92,
     nutPts:[[0.001,0.00],[0.22,0.03],[0.45,0.10],[0.68,0.24],[0.84,0.44],[0.93,0.66],[0.95,0.86],[0.90,1.02],[0.78,1.12],[0.60,1.17]] },
   kuri: { name:'栗', sx:1.02, sy:0.95, mass:1.05, st:{ atk:8, hp:4, spd:6 },
     nutCol:0x6e3f1d, huskCol:0x86662c, nutRough:0.35, capY:1.14, capR:0.84, iga:true },
@@ -298,51 +299,212 @@ function sideColor(hex, side){
   return c;
 }
 
-/* コナラの帽子用：ウロコ模様のテクスチャ（Canvasで生成、使い回す） */
-let _scaleTex = null;
-function scaleTexture(){
-  if (_scaleTex) return _scaleTex;
+/* 決定的な乱数（テクスチャと形のノイズ生成用。毎回同じ結果になる） */
+function makeRng(seed){
+  let a = seed >>> 0;
+  return function(){
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function hexRgb(hex){
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+/* カラー用Canvasテクスチャの共通生成（sRGB・異方性フィルタ付き） */
+function makeCanvasTex(w, h, draw){
   const cv = document.createElement('canvas');
-  cv.width = cv.height = 256;
-  const g = cv.getContext('2d');
-  g.fillStyle = '#f4f4f4'; g.fillRect(0, 0, 256, 256);
-  const rows = 8, cols = 8, w = 256 / cols, h = 256 / rows;
-  for (let r = 0; r < rows; r++){
-    for (let c = 0; c < cols; c++){
-      const x = c * w + (r % 2 ? w / 2 : 0), y = r * h;
-      g.beginPath();
-      g.arc(x, y + h * 0.2, w * 0.60, 0, Math.PI, false);
-      g.fillStyle = (r + c) % 2 ? '#d8d8d8' : '#e7e7e7';
-      g.fill();
-      g.strokeStyle = '#9d9d9d'; g.lineWidth = 2.5; g.stroke();
-    }
-  }
+  cv.width = w; cv.height = h;
+  draw(cv.getContext('2d'), w, h);
   const tex = new THREE.CanvasTexture(cv);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(3, 2);
-  _scaleTex = tex;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
   return tex;
 }
 
+/* ウロコ模様のテクスチャ（Canvasで生成、使い回す）。
+   鱗1枚ごとにグラデーション（下端が暗い＝下の鱗に落ちる陰影）とハイライトを描く */
+let _scaleTex = null;
+function scaleTexture(){
+  if (_scaleTex) return _scaleTex;
+  const rng = makeRng(7101);
+  _scaleTex = makeCanvasTex(512, 512, (g) => {
+    g.fillStyle = '#cfcfcf'; g.fillRect(0, 0, 512, 512);
+    const rows = 10, cols = 10, w = 512 / cols, h = 512 / rows;
+    for (let r = 0; r < rows; r++){
+      for (let c = -1; c < cols; c++){
+        const x = c * w + (r % 2 ? w / 2 : 0), y = r * h;
+        const j = 0.92 + rng() * 0.13;            // 鱗ごとの明るさのばらつき
+        const top = Math.round(248 * j), mid = Math.round(226 * j), bot = Math.round(176 * j);
+        const grad = g.createLinearGradient(0, y - h * 0.35, 0, y + h * 0.95);
+        grad.addColorStop(0, `rgb(${top},${top},${top})`);
+        grad.addColorStop(0.55, `rgb(${mid},${mid},${mid})`);
+        grad.addColorStop(1, `rgb(${bot},${bot},${bot})`);
+        g.beginPath();
+        g.arc(x, y + h * 0.15, w * 0.62, 0, Math.PI, false);
+        g.closePath();
+        g.fillStyle = grad; g.fill();
+        g.strokeStyle = 'rgba(70,70,70,0.55)'; g.lineWidth = 3; g.stroke();
+        g.beginPath();   // 上部のハイライト
+        g.arc(x, y + h * 0.15, w * 0.44, Math.PI * 1.15, Math.PI * 1.85);
+        g.strokeStyle = 'rgba(255,255,255,0.5)'; g.lineWidth = 3; g.stroke();
+      }
+    }
+  });
+  _scaleTex.repeat.set(3, 2);
+  return _scaleTex;
+}
+
 /* 縦じま模様のテクスチャ（Canvasで生成、パラメータごとに使い回す）。
-   回転体のU方向＝周方向なので、テクスチャの縦帯が帽子の縦じまになる */
+   回転体のU方向＝周方向なので、テクスチャの縦帯が帽子の縦じまになる。
+   縞ごとに幅と明るさをばらつかせ、帯の中央が明るく端が暗い濃淡を付ける */
 const _stripeTexCache = {};
 function stripeTexture(bands, light, dark){
   const key = bands + '/' + light + '/' + dark;
   if (_stripeTexCache[key]) return _stripeTexCache[key];
+  const rng = makeRng(9000 + bands);
+  const L = hexRgb(light), D = hexRgb(dark);
+  const widths = [];
+  let sum = 0;
+  for (let i = 0; i < bands; i++){ const w = 0.82 + rng() * 0.36; widths.push(w); sum += w; }
+  const tex = makeCanvasTex(512, 256, (g) => {
+    g.fillStyle = dark; g.fillRect(0, 0, 512, 256);
+    let x = 0;
+    for (let i = 0; i < bands; i++){
+      const w = widths[i] / sum * 512;
+      const c = i % 2 === 0 ? L : D;
+      const j = 0.94 + rng() * 0.10;
+      const ch = (v, f) => Math.max(0, Math.min(255, Math.round(v * j * f)));
+      const grad = g.createLinearGradient(x, 0, x + w, 0);
+      grad.addColorStop(0, `rgb(${ch(c[0], 0.76)},${ch(c[1], 0.76)},${ch(c[2], 0.76)})`);
+      grad.addColorStop(0.5, `rgb(${ch(c[0], 1)},${ch(c[1], 1)},${ch(c[2], 1)})`);
+      grad.addColorStop(1, `rgb(${ch(c[0], 0.76)},${ch(c[1], 0.76)},${ch(c[2], 0.76)})`);
+      g.fillStyle = grad;
+      g.fillRect(x, 0, w + 1, 256);
+      x += w;
+    }
+    // 細かいムラと斑点で均一さを崩す
+    for (let i = 0; i < 2600; i++){
+      const a = rng() * 0.07;
+      g.fillStyle = rng() < 0.5 ? `rgba(60,45,25,${a})` : `rgba(255,255,255,${a})`;
+      g.fillRect(rng() * 512, rng() * 256, 1.6, 1.6 + rng() * 5);
+    }
+  });
+  _stripeTexCache[key] = tex;
+  return tex;
+}
+
+/* チューリップ用：花びらの継ぎ目とグラデーションのテクスチャ。
+   回転体のvは裾（最初の点）が0側＝キャンバス下側なので、裾ほど色を深くする */
+let _petalTex = null;
+function petalTexture(){
+  if (_petalTex) return _petalTex;
+  const rng = makeRng(5501);
+  _petalTex = makeCanvasTex(512, 256, (g) => {
+    const petals = 6, w = 512 / petals;
+    for (let i = 0; i < petals; i++){
+      const x = i * w, j = 0.95 + rng() * 0.09;
+      const c = v => Math.round(v * j);
+      const grad = g.createLinearGradient(x, 0, x + w, 0);
+      grad.addColorStop(0, `rgb(${c(196)},${c(196)},${c(196)})`);
+      grad.addColorStop(0.5, `rgb(${c(246)},${c(246)},${c(246)})`);
+      grad.addColorStop(1, `rgb(${c(196)},${c(196)},${c(196)})`);
+      g.fillStyle = grad;
+      g.fillRect(x, 0, w + 1, 256);
+    }
+    const vg = g.createLinearGradient(0, 0, 0, 256);
+    vg.addColorStop(0, 'rgba(255,255,255,0.10)');
+    vg.addColorStop(0.55, 'rgba(0,0,0,0)');
+    vg.addColorStop(1, 'rgba(60,35,15,0.22)');
+    g.fillStyle = vg; g.fillRect(0, 0, 512, 256);
+    for (let i = 0; i < petals; i++){   // 継ぎ目：暗い線＋隣の細いハイライト
+      const x = i * w;
+      g.fillStyle = 'rgba(80,55,30,0.5)'; g.fillRect(x - 1.5, 0, 3, 256);
+      g.fillStyle = 'rgba(255,255,255,0.35)'; g.fillRect(x + 1.5, 0, 2, 256);
+    }
+    for (let i = 0; i < 380; i++){      // 花びら内の細い縦筋
+      g.fillStyle = `rgba(90,60,30,${0.03 + rng() * 0.05})`;
+      g.fillRect(rng() * 512, rng() * 80, 1.2, 120 + rng() * 136);
+    }
+  });
+  return _petalTex;
+}
+
+/* 実のテクスチャ：縦筋・斑点・色ムラを描く。本体種ごとに描き込みの性格を変えて
+   色味の個性を強める（テクスチャは白〜灰の乗算用で、色そのものはマテリアル色が決める） */
+const NUT_TEX_PARAMS = {
+  maru: { base:0.90, streaks:110, streakAlpha:0.15, speckles:900,  speckleAlpha:0.18, mottles:26, mottleAlpha:0.09, seed:1101 },
+  futo: { base:0.88, streaks:90,  streakAlpha:0.19, speckles:1250, speckleAlpha:0.22, mottles:42, mottleAlpha:0.13, seed:2202 },
+  hoso: { base:0.93, streaks:175, streakAlpha:0.09, speckles:380,  speckleAlpha:0.11, mottles:14, mottleAlpha:0.05, seed:3303 },
+  kuri: { base:0.86, streaks:80,  streakAlpha:0.21, speckles:1450, speckleAlpha:0.26, mottles:46, mottleAlpha:0.15, seed:4404 },
+};
+const _nutTexCache = {};
+function nutTexture(bodyKey){
+  if (_nutTexCache[bodyKey]) return _nutTexCache[bodyKey];
+  const P = NUT_TEX_PARAMS[bodyKey] || NUT_TEX_PARAMS.maru;
+  const rng = makeRng(P.seed);
+  const tex = makeCanvasTex(512, 512, (g) => {
+    const base = Math.round(P.base * 255);
+    g.fillStyle = `rgb(${base},${base},${base})`;
+    g.fillRect(0, 0, 512, 512);
+    for (let i = 0; i < P.mottles; i++){   // 色ムラ：大きな柔らかい濃淡
+      const x = rng() * 512, y = rng() * 512, r = 50 + rng() * 130;
+      const grad = g.createRadialGradient(x, y, 0, x, y, r);
+      grad.addColorStop(0, rng() < 0.55 ? `rgba(50,32,14,${P.mottleAlpha})` : `rgba(255,246,230,${P.mottleAlpha})`);
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = grad;
+      g.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    for (let i = 0; i < P.streaks; i++){   // 縦筋：繊維に沿った細い線（少しうねらせる）
+      const x0 = rng() * 512, wob = (rng() - 0.5) * 14, ph = rng() * Math.PI * 2;
+      const a = P.streakAlpha * (0.5 + rng() * 0.8);
+      g.strokeStyle = rng() < 0.6 ? `rgba(52,34,14,${a})` : `rgba(255,248,235,${a})`;
+      g.lineWidth = 0.8 + rng() * 2.0;
+      g.beginPath();
+      for (let y = 0; y <= 512; y += 32){
+        const x = x0 + Math.sin(ph + y * 0.012) * wob;
+        if (y === 0) g.moveTo(x, y); else g.lineTo(x, y);
+      }
+      g.stroke();
+    }
+    for (let i = 0; i < P.speckles; i++){ // 斑点
+      const a = P.speckleAlpha * (0.4 + rng() * 0.8);
+      g.fillStyle = rng() < 0.62 ? `rgba(48,30,12,${a})` : `rgba(255,244,225,${a})`;
+      const r = 0.7 + rng() * 1.9;
+      g.beginPath();
+      g.ellipse(rng() * 512, rng() * 512, r, r * (0.6 + rng() * 0.7), rng() * Math.PI, 0, Math.PI * 2);
+      g.fill();
+    }
+  });
+  _nutTexCache[bodyKey] = tex;
+  return tex;
+}
+
+/* トゲトゲ用：粗さのムラ（roughnessMap／bumpMapに使うグレースケールの斑模様）。
+   カラー情報ではないので sRGB にはしない */
+let _noiseTex = null;
+function noiseTexture(){
+  if (_noiseTex) return _noiseTex;
+  const rng = makeRng(8808);
   const cv = document.createElement('canvas');
-  cv.width = 256; cv.height = 64;
+  cv.width = cv.height = 256;
   const g = cv.getContext('2d');
-  const w = 256 / bands;
-  for (let i = 0; i < bands; i++){
-    g.fillStyle = i % 2 ? dark : light;
-    g.fillRect(Math.floor(i * w), 0, Math.ceil(w), 64);
+  g.fillStyle = '#e2e2e2'; g.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 900; i++){
+    const x = rng() * 256, y = rng() * 256, r = 4 + rng() * 22;
+    const v = 120 + Math.round(rng() * 135);
+    const grad = g.createRadialGradient(x, y, 0, x, y, r);
+    grad.addColorStop(0, `rgba(${v},${v},${v},0.5)`);
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = grad;
+    g.fillRect(x - r, y - r, r * 2, r * 2);
   }
-  g.fillStyle = 'rgba(90,70,40,0.35)';
-  for (let i = 0; i < bands; i++) g.fillRect(Math.floor(i * w), 0, 2, 64);
   const tex = new THREE.CanvasTexture(cv);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  _stripeTexCache[key] = tex;
+  _noiseTex = tex;
   return tex;
 }
 
@@ -351,6 +513,29 @@ function latheFrom(pts, mat){
   const mesh = new THREE.Mesh(new THREE.LatheGeometry(v, 28), mat);
   mesh.castShadow = true;
   return mesh;
+}
+
+/* 実の形に低周波で小さな歪みを加えて、完全な回転体から外す（有機感）。
+   シードは本体種で固定するので、同じ本体なら自分・CPUで同じ形になる。
+   変位は半径の最大2%弱に抑え、衝突判定（半径パラメータ側）には影響しない */
+function organicNoise(geometry, seedKey, amp){
+  let hsh = 2166136261;
+  for (let i = 0; i < seedKey.length; i++){ hsh ^= seedKey.charCodeAt(i); hsh = Math.imul(hsh, 16777619); }
+  const rng = makeRng(hsh >>> 0);
+  const p1 = rng() * Math.PI * 2, p2 = rng() * Math.PI * 2, p3 = rng() * Math.PI * 2;
+  const pos = geometry.attributes.position;
+  for (let i = 0; i < pos.count; i++){
+    const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    if (Math.hypot(x, z) < 1e-4) continue;   // 軸上の点は動かさない
+    const th = Math.atan2(z, x);
+    const n = 0.55 * Math.sin(3 * th + p1 + 2.0 * y)
+            + 0.30 * Math.sin(5 * th - p2 + 4.2 * y)
+            + 0.45 * Math.sin(2 * th + p3 - 1.6 * y);
+    const s = 1 + amp * n;
+    pos.setX(i, x * s);
+    pos.setZ(i, z * s);
+  }
+  pos.needsUpdate = true;
 }
 
 /* 原点＝軸の先端（下端）。spinGroup が回転し、root が位置と傾きを持つ */
@@ -363,11 +548,28 @@ function buildTopMesh(sel, side){
   // 本体のマテリアルは全て blink（瀕死の赤点滅）対象として登録する
   const blink = [];
   const stdMat = (hex, rough, extra = {}) => {
-    const m = new THREE.MeshStandardMaterial({ color: sideColor(hex, side), roughness: rough, ...extra });
+    const m = new THREE.MeshStandardMaterial({ color: sideColor(hex, side), roughness: rough, envMapIntensity: 0.5, ...extra });
     blink.push({ mat: m, base: m.color.clone() });
     return m;
   };
-  const nutMat = stdMat(body.nutCol, body.nutRough);
+  // 実の素材：プロシージャルテクスチャ（縦筋・斑点・色ムラ）を色と凹凸に使う。
+  // ツヤの強い実（粗さ0.4以下）はクリアコート付きの物理マテリアルにして、
+  // 環境の映り込みで光沢が映えるようにする。どちらも blink 登録は従来どおり
+  const nutTex = nutTexture(sel.body);
+  let nutMat;
+  if (body.nutRough <= 0.4){
+    nutMat = new THREE.MeshPhysicalMaterial({
+      color: sideColor(body.nutCol, side), roughness: body.nutRough,
+      map: nutTex, bumpMap: nutTex, bumpScale: 0.35,
+      clearcoat: 0.55, clearcoatRoughness: 0.35, envMapIntensity: 0.9,
+    });
+  } else {
+    nutMat = new THREE.MeshStandardMaterial({
+      color: sideColor(body.nutCol, side), roughness: body.nutRough,
+      map: nutTex, bumpMap: nutTex, bumpScale: 0.35, envMapIntensity: 0.55,
+    });
+  }
+  blink.push({ mat: nutMat, base: nutMat.color.clone() });
   const capMat = stdMat(pants.col, pants.rough);
   const below = 0.5;   // 本体より下に出る軸の長さ（軸は全コマ共通）
 
@@ -382,6 +584,7 @@ function buildTopMesh(sel, side){
     const peek = latheFrom([
       [0.001,0.00],[0.30,0.02],[0.52,0.08],[0.66,0.18],[0.70,0.30],
     ], nutMat);
+    organicNoise(peek.geometry, sel.body, 0.012);
     const huskMat = stdMat(body.huskCol, 0.95);
     const husk = latheFrom([
       [0.001,0.16],[0.40,0.20],[0.68,0.30],[0.88,0.48],[0.98,0.70],
@@ -412,6 +615,7 @@ function buildTopMesh(sel, side){
     nutTopY = 1.38;
   } else {
     const nut = latheFrom(body.nutPts, nutMat);
+    organicNoise(nut.geometry, sel.body, 0.014);
     bodyG.add(nut);
     nutTopY = Math.max(...body.nutPts.map(p => p[1]));
   }
@@ -422,25 +626,30 @@ function buildTopMesh(sel, side){
   capG.scale.set(body.capR, 1, body.capR);
   capG.add(latheFrom(pants.pts, capMat));
   if (pants.kind === 'scales'){
-    // ウロコ：帽子にウロコ模様（色の濃淡＋凹凸）
+    // ウロコ：帽子にウロコ模様（鱗1枚ごとの陰影＋凹凸）
     const tex = scaleTexture();
     capMat.map = tex;
     capMat.bumpMap = tex;
-    capMat.bumpScale = 0.2;
+    capMat.bumpScale = 0.25;
   } else if (pants.kind === 'stripes'){
-    // シマシマ：縦じま模様（色の濃淡＋凹凸）
+    // シマシマ：縦じま模様（縞の濃淡と乱れ＋凹凸）
     const tex = stripeTexture(18, '#efefef', '#bcbcbc');
     capMat.map = tex;
     capMat.bumpMap = tex;
-    capMat.bumpScale = 0.12;
+    capMat.bumpScale = 0.15;
   } else if (pants.kind === 'petal'){
-    // チューリップ：花びらの継ぎ目を薄い縦じまで表現
-    const tex = stripeTexture(6, '#f4f4f4', '#d8d8d8');
+    // チューリップ：花びらの継ぎ目とグラデーション
+    const tex = petalTexture();
     capMat.map = tex;
     capMat.bumpMap = tex;
-    capMat.bumpScale = 0.08;
+    capMat.bumpScale = 0.1;
   } else if (pants.kind === 'shaggy'){
-    // トゲトゲ：分厚い帽子の縁に細かい突起（モジャモジャ）を多数付ける
+    // トゲトゲ：粗さのムラ（斑模様を roughness と凹凸に使う）
+    const ntex = noiseTexture();
+    capMat.roughnessMap = ntex;
+    capMat.bumpMap = ntex;
+    capMat.bumpScale = 0.3;
+    // 分厚い帽子の縁に細かい突起（モジャモジャ）を多数付ける
     const fringeMat = stdMat(0x4e3319, 1.0);
     const M = 30;
     const fringe = new THREE.InstancedMesh(new THREE.ConeGeometry(0.028, 0.20, 5), fringeMat, M);
@@ -524,17 +733,23 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setClearColor(0xf7ead2, 1);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.08;
 document.getElementById('stage').appendChild(renderer.domElement);
 
 function addLights(scene, shadowRange){
-  scene.add(new THREE.HemisphereLight(0xfff4dd, 0x9a7a4f, 0.95));
-  const sun = new THREE.DirectionalLight(0xffffff, 1.7);
+  // 環境光（IBL）が下地の明るさを担うので、半球光は控えめにして二重に明るくしない
+  scene.add(new THREE.HemisphereLight(0xfff4dd, 0x9a7a4f, 0.55));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.6);
   sun.position.set(5, 10, 4);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(1024, 1024);
+  sun.shadow.mapSize.set(1024, 1024);   // モバイル負荷に配慮したサイズ
   sun.shadow.camera.left = -shadowRange; sun.shadow.camera.right = shadowRange;
   sun.shadow.camera.top = shadowRange;   sun.shadow.camera.bottom = -shadowRange;
+  sun.shadow.camera.near = 2;
   sun.shadow.camera.far = 30;
+  sun.shadow.bias = -0.0003;            // 曲面のシャドウアクネ対策
+  sun.shadow.normalBias = 0.03;
   scene.add(sun);
 }
 
@@ -601,6 +816,17 @@ const BASE_FRICTION = 0.22;   // 速度の摩擦係数（/秒）。ブースト�
 const battleScene = new THREE.Scene();
 battleScene.background = new THREE.Color(0xf7ead2);
 addLights(battleScene, 9);
+
+/* 環境光（IBL）：RoomEnvironment を PMREM 化して両シーンに設定し、
+   PBR素材に周囲の映り込みを与える。強さは各マテリアルの envMapIntensity で
+   抑え気味にしてあり、画風が壊れない範囲に留める */
+{
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  const envTex = pmrem.fromScene(new RoomEnvironment(renderer), 0.04).texture;
+  previewScene.environment = envTex;
+  battleScene.environment = envTex;
+  pmrem.dispose();
+}
 const battleCam = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
 {
   const ground = new THREE.Mesh(
