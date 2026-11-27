@@ -100,15 +100,15 @@
      下部のボタン操作で指に隠れないよう上部に置く）。状態でフィル色を変える：
      使用中＝赤系、回復中＝くすんだ青灰、クールタイム中（Maxだが待ち）＝金、
      使用可能＝通常の橙グラデーション */
-  #boost-gauge-wrap{ flex:1; height:8px; background:rgba(255,253,246,.8);
+  #boost-gauge-wrap, #boost-gauge-wrap-cpu{ flex:1; height:8px; background:rgba(255,253,246,.8);
     border:2px solid var(--line); border-radius:5px; overflow:hidden; }
-  #boost-row .hname{ width:44px; font-size:10px; }
-  #boost-gauge-fill{ height:100%; width:100%; background:linear-gradient(90deg,#e8a34c,#cf6f2a);
+  #boost-row .hname, #boost-row-cpu .hname{ width:44px; font-size:10px; }
+  #boost-gauge-fill, #boost-gauge-fill-cpu{ height:100%; width:100%; background:linear-gradient(90deg,#e8a34c,#cf6f2a);
     transition:width .1s linear; }
-  #boost-gauge-wrap.using #boost-gauge-fill{ background:linear-gradient(90deg,#e86a1e,#d23c1e); }
-  #boost-gauge-wrap.recovering #boost-gauge-fill{ background:#9db4c0; }
-  #boost-gauge-wrap.cooldown #boost-gauge-fill{ background:#c9a227; }
-  #boost-gauge-wrap.ready-flash{ animation:boostReady .7s ease-out; }
+  #boost-gauge-wrap.using #boost-gauge-fill, #boost-gauge-wrap-cpu.using #boost-gauge-fill-cpu{ background:linear-gradient(90deg,#e86a1e,#d23c1e); }
+  #boost-gauge-wrap.recovering #boost-gauge-fill, #boost-gauge-wrap-cpu.recovering #boost-gauge-fill-cpu{ background:#9db4c0; }
+  #boost-gauge-wrap.cooldown #boost-gauge-fill, #boost-gauge-wrap-cpu.cooldown #boost-gauge-fill-cpu{ background:#c9a227; }
+  #boost-gauge-wrap.ready-flash, #boost-gauge-wrap-cpu.ready-flash{ animation:boostReady .7s ease-out; }
   @keyframes boostReady{
     0%{ box-shadow:0 0 0 0 rgba(207,111,42,0); }
     30%{ box-shadow:0 0 0 7px rgba(207,111,42,.5); }
@@ -160,8 +160,8 @@
     <div id="stats-panel"><div class="stats" id="stats"></div></div>
   </div>
   <div id="build-panel">
-    <div class="group-label">軸</div>
-    <div class="chips" id="chips-axis"></div>
+    <div class="group-label">パンツ</div>
+    <div class="chips" id="chips-pants"></div>
     <div class="group-label">本体</div>
     <div class="chips" id="chips-body"></div>
     <div class="group-label">オプション</div>
@@ -180,6 +180,7 @@
     <div class="hud-row"><span class="hname" id="name-player">あなた</span><div class="bar"><div class="fill" id="spin-player"></div></div></div>
     <div class="hud-row" id="boost-row" style="display:none"><span class="hname">ブースト</span><div id="boost-gauge-wrap"><div id="boost-gauge-fill"></div></div></div>
     <div class="hud-row"><span class="hname" id="name-cpu">CPU</span><div class="bar"><div class="fill" id="spin-cpu"></div></div></div>
+    <div class="hud-row" id="boost-row-cpu" style="display:none"><span class="hname">ブースト</span><div id="boost-gauge-wrap-cpu"><div id="boost-gauge-fill-cpu"></div></div></div>
   </div>
   <div id="power-wrap">
     <div id="timing-wrap"><div id="timing-ring"></div><div id="clash-msg"></div></div>
@@ -211,37 +212,38 @@ import * as THREE from 'three';
 
 /* ================= パーツ定義 =================
    st: こうげき(atk) / たいりょく(hp) / スピード(spd) への寄与。
-   軸はどれも合計12、本体はどれも合計18で、同種パーツに優劣はなく配分だけが違う。
+   パンツはどれも合計12、本体はどれも合計18で、同種パーツに優劣はなく配分だけが違う。
    オプションは±0の付け替え（shift）：指定ステータスへ点を移動するだけで合計は変わらない。
-   よって、どの組み合わせでも3ステータスの合計は常に30になる */
-const AXES = {
-  normal: { name:'ふつう',   len:1.0,  r:0.050, mass:1.00, st:{ atk:4, hp:4, spd:4 } },
-  long:   { name:'ロング',   len:1.5,  r:0.050, mass:1.00, st:{ atk:2, hp:8, spd:2 } },
-  short:  { name:'ショート', len:0.62, r:0.050, mass:0.95, st:{ atk:2, hp:2, spd:8 } },
-  fat:    { name:'ふと軸',   len:1.0,  r:0.105, mass:1.30, st:{ atk:8, hp:2, spd:2 } },
+   よって、どの組み合わせでも3ステータスの合計は常に30になる。
+   つまようじ（軸）は全コマ共通の見た目として刺さったまま残り、パーツとしては選ばない */
+/* パンツ（帽子＝殻斗）。pts は「被せ位置での実の半径＝1」を基準にした回転体プロファイル
+   （yは被せ位置からの高さ）。kind: 'scales'=ウロコ模様 / 'shaggy'=棘・モジャモジャの分厚い帽子 /
+   'petal'=花びらのように下に広がる / 'stripes'=縦じま模様。topY はプロファイルの最高点 */
+const PANTS = {
+  uroko:      { name:'ウロコ',       st:{ atk:4, hp:4, spd:4 }, col:0x7a5230, rough:0.95, kind:'scales',  topY:0.45,
+    pts:[[1.00,0.00],[1.10,0.05],[1.14,0.13],[1.06,0.24],[0.88,0.33],[0.60,0.40],[0.28,0.44],[0.001,0.45]] },
+  togetoge:   { name:'トゲトゲ',     st:{ atk:8, hp:2, spd:2 }, col:0x5d4020, rough:1.00, kind:'shaggy',  topY:0.48,
+    pts:[[1.02,0.00],[1.12,0.06],[1.14,0.16],[1.04,0.28],[0.84,0.38],[0.55,0.44],[0.24,0.47],[0.001,0.48]] },
+  tulip:      { name:'チューリップ', st:{ atk:2, hp:8, spd:2 }, col:0x96502a, rough:0.80, kind:'petal',   topY:0.42,
+    pts:[[1.18,-0.20],[1.10,-0.08],[1.00,0.00],[1.02,0.10],[0.94,0.22],[0.74,0.32],[0.45,0.39],[0.001,0.42]] },
+  shimashima: { name:'シマシマ',     st:{ atk:2, hp:2, spd:8 }, col:0x6e4f2c, rough:0.90, kind:'stripes', topY:0.43,
+    pts:[[1.00,0.00],[1.08,0.05],[1.10,0.14],[1.00,0.25],[0.82,0.34],[0.55,0.40],[0.001,0.43]] },
 };
-/* 本体は実在のどんぐり5種。nutPts/capPts は単位空間（高さ1.40）の回転体プロファイル。
-   capKind: 'scales'=ウロコ模様の帽子（コナラ） / 'shaggy'=縁がモジャモジャの分厚い帽子（クヌギ） /
-            'iga'=棘だらけの殻（クリ） / 'small'=小さく浅い帽子（マテバシイ・スダジイ） */
+/* 本体は帽子なしの「実」だけの形。nutPts は単位空間（高さ1.40基準）の回転体プロファイル。
+   capY/capR: パンツを被せる高さと、その高さでの実の半径。パンツはこの半径に合わせて付くので、
+   どのパンツ×本体の組み合わせでも帽子が実の幅に合い、見た目が破綻しない */
 const BODIES = {
-  konara: { name:'コナラ', sx:1.00, sy:1.00, mass:1.00, st:{ atk:6, hp:6, spd:6 },
-    nutCol:0xb57a38, capCol:0x7a5230, nutRough:0.60, capKind:'scales',
-    nutPts:[[0.001,0.00],[0.30,0.02],[0.55,0.08],[0.78,0.22],[0.92,0.42],[0.99,0.62],[1.00,0.78],[0.94,0.92],[0.82,1.00]],
-    capPts:[[0.84,0.97],[0.97,1.03],[1.01,1.12],[0.95,1.22],[0.78,1.30],[0.52,1.36],[0.24,1.39],[0.001,1.40]] },
-  kunugi: { name:'クヌギ', sx:1.14, sy:0.78, mass:1.15, st:{ atk:5, hp:8, spd:5 },
-    nutCol:0xa5712f, capCol:0x5d4020, nutRough:0.70, capKind:'shaggy',
-    nutPts:[[0.001,0.00],[0.34,0.02],[0.62,0.07],[0.85,0.18],[0.97,0.36],[1.00,0.55],[0.97,0.72],[0.86,0.84],[0.70,0.90]],
-    capPts:[[0.72,0.86],[0.90,0.90],[1.00,0.98],[1.02,1.08],[0.96,1.20],[0.80,1.31],[0.55,1.37],[0.26,1.395],[0.001,1.40]] },
-  kuri: { name:'クリ', sx:1.02, sy:0.95, mass:1.05, st:{ atk:8, hp:4, spd:6 },
-    nutCol:0x6e3f1d, capCol:0x86662c, nutRough:0.35, capKind:'iga' },
-  matebashii: { name:'マテバシイ', sx:0.80, sy:1.32, mass:0.80, st:{ atk:3, hp:3, spd:12 },
-    nutCol:0xc08b4a, capCol:0x8a6136, nutRough:0.25, capKind:'small',
-    nutPts:[[0.001,0.00],[0.22,0.03],[0.45,0.10],[0.68,0.24],[0.84,0.44],[0.93,0.66],[0.95,0.86],[0.90,1.02],[0.78,1.12],[0.60,1.17]],
-    capPts:[[0.62,1.14],[0.78,1.17],[0.86,1.23],[0.84,1.30],[0.70,1.35],[0.45,1.385],[0.001,1.40]] },
-  sudajii: { name:'スダジイ', sx:0.88, sy:1.12, mass:0.90, st:{ atk:6, hp:4, spd:8 },
-    nutCol:0x7c4a22, capCol:0x66452a, nutRough:0.30, capKind:'small',
-    nutPts:[[0.001,0.00],[0.10,0.02],[0.30,0.07],[0.55,0.18],[0.76,0.36],[0.89,0.58],[0.94,0.78],[0.92,0.94],[0.82,1.05],[0.64,1.12]],
-    capPts:[[0.66,1.09],[0.82,1.13],[0.90,1.20],[0.86,1.29],[0.68,1.35],[0.40,1.39],[0.001,1.40]] },
+  maru: { name:'丸', sx:1.00, sy:1.00, mass:1.00, st:{ atk:6, hp:6, spd:6 },
+    nutCol:0xb57a38, nutRough:0.60, capY:0.88, capR:0.97,
+    nutPts:[[0.001,0.00],[0.30,0.02],[0.55,0.08],[0.78,0.22],[0.92,0.42],[0.99,0.62],[1.00,0.78],[0.94,0.92],[0.82,1.00]] },
+  futo: { name:'太', sx:1.14, sy:0.78, mass:1.15, st:{ atk:5, hp:8, spd:5 },
+    nutCol:0xa5712f, nutRough:0.70, capY:0.76, capR:0.95,
+    nutPts:[[0.001,0.00],[0.34,0.02],[0.62,0.07],[0.85,0.18],[0.97,0.36],[1.00,0.55],[0.97,0.72],[0.86,0.84],[0.70,0.90]] },
+  hoso: { name:'細', sx:0.80, sy:1.32, mass:0.80, st:{ atk:3, hp:3, spd:12 },
+    nutCol:0xc08b4a, nutRough:0.25, capY:1.02, capR:0.92,
+    nutPts:[[0.001,0.00],[0.22,0.03],[0.45,0.10],[0.68,0.24],[0.84,0.44],[0.93,0.66],[0.95,0.86],[0.90,1.02],[0.78,1.12],[0.60,1.17]] },
+  kuri: { name:'栗', sx:1.02, sy:0.95, mass:1.05, st:{ atk:8, hp:4, spd:6 },
+    nutCol:0x6e3f1d, huskCol:0x86662c, nutRough:0.35, capY:1.14, capR:0.84, iga:true },
 };
 const OPTIONS = {
   none:  { name:'なし',   mass:1.00, shift:null },
@@ -254,10 +256,10 @@ const STAT_KEYS = [
 ];
 
 function calcStats(sel){
-  const a = AXES[sel.axis], b = BODIES[sel.body], o = OPTIONS[sel.option];
+  const a = PANTS[sel.pants], b = BODIES[sel.body], o = OPTIONS[sel.option];
   const st = {};
   for (const [k] of STAT_KEYS){
-    st[k] = a.st[k] + b.st[k];   // 軸＋本体の素の合計（常に30）
+    st[k] = a.st[k] + b.st[k];   // パンツ＋本体の素の合計（常に30）
   }
   // オプションの付け替え：他の2ステータスから半分ずつを目安に、ある分だけ取る。
   // 片方が足りなければもう片方から取るので、合計は変わらずマイナスにもならない。
@@ -280,7 +282,7 @@ function calcStats(sel){
     atkMult: 0.45 + 0.05 * st.atk,    // 衝突で与えるダメージの倍率
     maxSpin: 30 + 6 * st.hp,          // 最大体力（スピンの上限）
     spdMult: 0.70 + 0.032 * st.spd,   // そのコマ個別の速度倍率
-    mass: a.mass * b.mass * o.mass,
+    mass: b.mass * o.mass,        // 軸（つまようじ）は全コマ共通なので質量は本体×オプションのみ
     radius: b.sx,                 // 基準半径1 × 本体の横スケール
   };
 }
@@ -322,6 +324,28 @@ function scaleTexture(){
   return tex;
 }
 
+/* 縦じま模様のテクスチャ（Canvasで生成、パラメータごとに使い回す）。
+   回転体のU方向＝周方向なので、テクスチャの縦帯が帽子の縦じまになる */
+const _stripeTexCache = {};
+function stripeTexture(bands, light, dark){
+  const key = bands + '/' + light + '/' + dark;
+  if (_stripeTexCache[key]) return _stripeTexCache[key];
+  const cv = document.createElement('canvas');
+  cv.width = 256; cv.height = 64;
+  const g = cv.getContext('2d');
+  const w = 256 / bands;
+  for (let i = 0; i < bands; i++){
+    g.fillStyle = i % 2 ? dark : light;
+    g.fillRect(Math.floor(i * w), 0, Math.ceil(w), 64);
+  }
+  g.fillStyle = 'rgba(90,70,40,0.35)';
+  for (let i = 0; i < bands; i++) g.fillRect(Math.floor(i * w), 0, 2, 64);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  _stripeTexCache[key] = tex;
+  return tex;
+}
+
 function latheFrom(pts, mat){
   const v = pts.map(p => new THREE.Vector2(p[0], p[1]));
   const mesh = new THREE.Mesh(new THREE.LatheGeometry(v, 28), mat);
@@ -331,7 +355,7 @@ function latheFrom(pts, mat){
 
 /* 原点＝軸の先端（下端）。spinGroup が回転し、root が位置と傾きを持つ */
 function buildTopMesh(sel, side){
-  const axis = AXES[sel.axis], body = BODIES[sel.body], opt = sel.option;
+  const pants = PANTS[sel.pants], body = BODIES[sel.body], opt = sel.option;
   const root = new THREE.Group();
   const spinG = new THREE.Group();
   root.add(spinG);
@@ -344,28 +368,26 @@ function buildTopMesh(sel, side){
     return m;
   };
   const nutMat = stdMat(body.nutCol, body.nutRough);
-  const capMat = stdMat(body.capCol, 0.95);
-  const bodyH = 1.40 * body.sy;
-  const below = 0.5 * axis.len;   // 本体より下に出る軸の長さ
+  const capMat = stdMat(pants.col, pants.rough);
+  const below = 0.5;   // 本体より下に出る軸の長さ（軸は全コマ共通）
 
-  // 本体（どんぐり）：種ごとに輪郭と帽子（殻斗）の作りを変える
+  // 本体（実）：形ごとに輪郭を変える。パンツ（帽子）はこの上に別途被せる
   const bodyG = new THREE.Group();
   bodyG.position.y = below;
   bodyG.scale.set(body.sx, body.sy, body.sx);
-  const stem = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.05, 0.065, 0.24, 8), capMat);
-  stem.position.set(0.03, 1.46, 0); stem.rotation.z = 0.18; stem.castShadow = true;
 
-  if (body.capKind === 'iga'){
-    // クリ：下部に実が少し覗き、大部分は棘だらけのイガ（殻）に覆われる
+  let nutTopY = 0;   // 実（栗はイガ）の一番高い点。軸の長さの計算に使う
+  if (body.iga){
+    // 栗：下部に実が少し覗き、大部分は棘だらけのイガ（殻）に覆われる
     const peek = latheFrom([
       [0.001,0.00],[0.30,0.02],[0.52,0.08],[0.66,0.18],[0.70,0.30],
     ], nutMat);
+    const huskMat = stdMat(body.huskCol, 0.95);
     const husk = latheFrom([
       [0.001,0.16],[0.40,0.20],[0.68,0.30],[0.88,0.48],[0.98,0.70],
       [0.99,0.90],[0.90,1.08],[0.72,1.22],[0.45,1.33],[0.001,1.38],
-    ], capMat);
-    bodyG.add(peek, husk, stem);
+    ], huskMat);
+    bodyG.add(peek, husk);
     // 棘：フィボナッチ球で均等配置（InstancedMeshで1オブジェクトにまとめる）
     const spikeMat = stdMat(0x74551f, 1.0);
     const N = 120;
@@ -375,7 +397,7 @@ function buildTopMesh(sel, side){
     let placed = 0;
     for (let i = 0; i < N * 3 && placed < N; i++){
       const yy = 1 - (i / (N * 3 - 1)) * 2;        // 1 → -1
-      if (yy < -0.45) continue;                    // 下部（実が覗く部分）には生やさない
+      if (yy < -0.45 || yy > 0.10) continue;       // 下部（実が覗く部分）と上部（パンツを被せる部分）には生やさない
       const rr = Math.sqrt(Math.max(0, 1 - yy * yy));
       const th = i * 2.399963;                     // 黄金角
       const dir = new THREE.Vector3(Math.cos(th) * rr, yy, Math.sin(th) * rr);
@@ -387,35 +409,62 @@ function buildTopMesh(sel, side){
     spikes.count = placed;
     spikes.castShadow = true;
     bodyG.add(spikes);
+    nutTopY = 1.38;
   } else {
     const nut = latheFrom(body.nutPts, nutMat);
-    const cap = latheFrom(body.capPts, capMat);
-    bodyG.add(nut, cap, stem);
-    if (body.capKind === 'scales'){
-      // コナラ：帽子にウロコ模様（色の濃淡＋凹凸）
-      const tex = scaleTexture();
-      capMat.map = tex;
-      capMat.bumpMap = tex;
-      capMat.bumpScale = 0.2;
-    } else if (body.capKind === 'shaggy'){
-      // クヌギ：分厚い帽子の縁に細かい突起（モジャモジャ）を多数付ける
-      const fringeMat = stdMat(0x4e3319, 1.0);
-      const M = 30;
-      const fringe = new THREE.InstancedMesh(new THREE.ConeGeometry(0.028, 0.20, 5), fringeMat, M);
-      const m4 = new THREE.Matrix4(), q = new THREE.Quaternion();
-      const up = new THREE.Vector3(0, 1, 0);
-      for (let i = 0; i < M; i++){
-        const th = (i / M) * Math.PI * 2 + (i % 2) * 0.1;
-        const dir = new THREE.Vector3(Math.cos(th) * 0.75, -0.66, Math.sin(th) * 0.75).normalize();
-        const pos = new THREE.Vector3(Math.cos(th) * 1.00, 0.95, Math.sin(th) * 1.00);
-        q.setFromUnitVectors(up, dir);
-        m4.compose(pos, q, new THREE.Vector3(1, 1, 1));
-        fringe.setMatrixAt(i, m4);
-      }
-      fringe.castShadow = true;
-      bodyG.add(fringe);
-    }
+    bodyG.add(nut);
+    nutTopY = Math.max(...body.nutPts.map(p => p[1]));
   }
+
+  // パンツ（帽子）：実の幅（capR）に合わせて被せるので、どの組み合わせでも幅が合う
+  const capG = new THREE.Group();
+  capG.position.y = body.capY;
+  capG.scale.set(body.capR, 1, body.capR);
+  capG.add(latheFrom(pants.pts, capMat));
+  if (pants.kind === 'scales'){
+    // ウロコ：帽子にウロコ模様（色の濃淡＋凹凸）
+    const tex = scaleTexture();
+    capMat.map = tex;
+    capMat.bumpMap = tex;
+    capMat.bumpScale = 0.2;
+  } else if (pants.kind === 'stripes'){
+    // シマシマ：縦じま模様（色の濃淡＋凹凸）
+    const tex = stripeTexture(18, '#efefef', '#bcbcbc');
+    capMat.map = tex;
+    capMat.bumpMap = tex;
+    capMat.bumpScale = 0.12;
+  } else if (pants.kind === 'petal'){
+    // チューリップ：花びらの継ぎ目を薄い縦じまで表現
+    const tex = stripeTexture(6, '#f4f4f4', '#d8d8d8');
+    capMat.map = tex;
+    capMat.bumpMap = tex;
+    capMat.bumpScale = 0.08;
+  } else if (pants.kind === 'shaggy'){
+    // トゲトゲ：分厚い帽子の縁に細かい突起（モジャモジャ）を多数付ける
+    const fringeMat = stdMat(0x4e3319, 1.0);
+    const M = 30;
+    const fringe = new THREE.InstancedMesh(new THREE.ConeGeometry(0.028, 0.20, 5), fringeMat, M);
+    const m4 = new THREE.Matrix4(), q = new THREE.Quaternion();
+    const up = new THREE.Vector3(0, 1, 0);
+    for (let i = 0; i < M; i++){
+      const th = (i / M) * Math.PI * 2 + (i % 2) * 0.1;
+      const dir = new THREE.Vector3(Math.cos(th) * 0.75, -0.66, Math.sin(th) * 0.75).normalize();
+      const pos = new THREE.Vector3(Math.cos(th) * 1.06, 0.04, Math.sin(th) * 1.06);
+      q.setFromUnitVectors(up, dir);
+      m4.compose(pos, q, new THREE.Vector3(1, 1, 1));
+      fringe.setMatrixAt(i, m4);
+    }
+    fringe.castShadow = true;
+    capG.add(fringe);
+  }
+  bodyG.add(capG);
+
+  // へた（帽子の柄）：パンツの天辺に付ける
+  const stem = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.05, 0.065, 0.24, 8), capMat);
+  stem.position.set(0.03, body.capY + pants.topY + 0.05, 0);
+  stem.rotation.z = 0.18; stem.castShadow = true;
+  bodyG.add(stem);
 
   // オプションパーツ（本体グループ内なので形に追随する）
   if (opt === 'toge'){
@@ -445,17 +494,18 @@ function buildTopMesh(sel, side){
   }
   spinG.add(bodyG);
 
-  // 軸（つまようじ）: 先端から本体を貫いて上へ
-  const above = 0.30 * axis.len;
+  // 軸（つまようじ）: 先端から本体を貫いて上へ（全コマ共通の見た目）
+  const bodyH = Math.max(nutTopY, body.capY + pants.topY) * body.sy;
+  const above = 0.30;
   const shaftLen = below + bodyH + above;
   const shaft = new THREE.Mesh(
-    new THREE.CylinderGeometry(axis.r, axis.r * 0.8, shaftLen, 10),
+    new THREE.CylinderGeometry(0.05, 0.04, shaftLen, 10),
     new THREE.MeshStandardMaterial({ color:SHAFT_COL, roughness:0.8 }));
   shaft.position.y = shaftLen / 2;
   shaft.castShadow = true;
   spinG.add(shaft);
 
-  // 瀕死サイン用：本体の全マテリアル（実・帽子・イガの棘・クヌギの縁など）と元の色を覚えておく
+  // 瀕死サイン用：本体の全マテリアル（実・帽子・イガの棘・トゲトゲの縁など）と元の色を覚えておく
   root.userData.blink = blink;
   root.userData.spinG = spinG;
   return root;
@@ -794,36 +844,53 @@ function spawnJustBurst(x, z, boostRisk){
   }
 }
 
-/* --- ブースト中の渦パーティクル（軸の接地点から渦巻いて上昇し、コマを包む） ---
-   プール管理の Points。基部はプレイヤーの現在位置に追随し、粒子は高速で
-   回転しながら上昇して消える。色は白〜水色系、加算ブレンド */
-const VORTEX_MAX = 110;
-const vortexPos = new Float32Array(VORTEX_MAX * 3);
-const vortexCol = new Float32Array(VORTEX_MAX * 3);
-const vortexDat = [];
-for (let i = 0; i < VORTEX_MAX; i++){
-  vortexPos[i * 3 + 1] = -999;
-  vortexDat.push({ ang: 0, rad: 0.2, h: 0, va: 10, vh: 2, life: 0, maxLife: 1 });
+/* CPUのジャスト成功バースト（赤）。CPUのブーストアタック成功時（boostAtk）は
+   プレイヤー側と同様に派手に：大きく・長く＋二重バースト＋赤い衝撃波リングを重ねる */
+function spawnCpuJustBurst(x, z, boostAtk){
+  if (boostAtk){
+    spawnBurst(x, z, 0xff4040, { from: 1.5, to: 3.6, dur: 0.45, opacity: 1.0 });
+    spawnBurst(x, z, 0xffa9a0, { from: 1.0, to: 2.7, dur: 0.4, opacity: 0.9, delay: 0.07 });
+    spawnRing(x, z, 1.0, true, 0xff4040);
+    spawnRing(x, z, 0.6, true, 0xffa9a0);
+  } else {
+    spawnBurst(x, z, 0xff4040);
+  }
 }
-const vortexGeo = new THREE.BufferGeometry();
-vortexGeo.setAttribute('position', new THREE.BufferAttribute(vortexPos, 3));
-vortexGeo.setAttribute('color', new THREE.BufferAttribute(vortexCol, 3));
-const vortexPoints = new THREE.Points(vortexGeo, new THREE.PointsMaterial({
-  size: 0.13, vertexColors: true, transparent: true,
-  blending: THREE.AdditiveBlending, depthWrite: false,
-}));
-vortexPoints.frustumCulled = false;
-battleScene.add(vortexPoints);
-let vortexCursor = 0, vortexAcc = 0;
 
-function updateVortex(dt){
-  const P = fighters && fighters.player;
-  const active = !demoMode && phase === 'fight' && P && P.launched && currentBoostMult() > 1;
+/* --- ブースト中の渦パーティクル（軸の接地点から渦巻いて上昇し、コマを包む） ---
+   プール管理の Points を両者分用意する。基部はそのコマの現在位置に追随し、粒子は
+   高速で回転しながら上昇して消える。加算ブレンド。
+   色はサイドで変える：プレイヤー側＝白〜水色系、CPU側＝白〜黄緑系 */
+const VORTEX_MAX = 110;
+function makeVortex(r, g, b){
+  const pos = new Float32Array(VORTEX_MAX * 3);
+  const col = new Float32Array(VORTEX_MAX * 3);
+  const dat = [];
+  for (let i = 0; i < VORTEX_MAX; i++){
+    pos[i * 3 + 1] = -999;
+    dat.push({ ang: 0, rad: 0.2, h: 0, va: 10, vh: 2, life: 0, maxLife: 1 });
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  const points = new THREE.Points(geo, new THREE.PointsMaterial({
+    size: 0.13, vertexColors: true, transparent: true,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  }));
+  points.frustumCulled = false;
+  battleScene.add(points);
+  return { pos, col, dat, geo, cursor: 0, acc: 0, rgb: [r, g, b] };
+}
+const vortexP = makeVortex(0.72, 0.90, 1.00);   // プレイヤー側（デモ対戦ではCPU1）
+const vortexC = makeVortex(0.62, 1.00, 0.60);   // CPU側（デモ対戦ではCPU2）
+
+function updateVortexSys(sys, f, mult, dt){
+  const active = phase === 'fight' && f && f.launched && mult > 1;
   if (active){
-    vortexAcc += dt * 55;   // 毎秒約55個スポーン（プール110個・寿命0.6〜0.9秒で常時60個前後）
-    while (vortexAcc >= 1){
-      vortexAcc -= 1;
-      const d = vortexDat[vortexCursor]; vortexCursor = (vortexCursor + 1) % VORTEX_MAX;
+    sys.acc += dt * 55;   // 毎秒約55個スポーン（プール110個・寿命0.6〜0.9秒で常時60個前後）
+    while (sys.acc >= 1){
+      sys.acc -= 1;
+      const d = sys.dat[sys.cursor]; sys.cursor = (sys.cursor + 1) % VORTEX_MAX;
       d.ang = Math.random() * Math.PI * 2;
       d.rad = 0.14 + Math.random() * 0.28;
       d.h = 0;
@@ -832,30 +899,36 @@ function updateVortex(dt){
       d.maxLife = d.life = 0.6 + Math.random() * 0.3;
     }
   }
-  const bx = P ? P.x : 0, bz = P ? P.z : 0;
-  const by = P ? bowlY(Math.min(Math.hypot(bx, bz), ARENA_R + 0.6)) : 0;
+  const bx = f ? f.x : 0, bz = f ? f.z : 0;
+  const by = f ? bowlY(Math.min(Math.hypot(bx, bz), ARENA_R + 0.6)) : 0;
   for (let i = 0; i < VORTEX_MAX; i++){
-    const d = vortexDat[i];
+    const d = sys.dat[i];
     if (d.life <= 0) continue;
     d.life -= dt;
     if (d.life <= 0){
-      vortexPos[i * 3 + 1] = -999;
-      vortexCol[i * 3] = vortexCol[i * 3 + 1] = vortexCol[i * 3 + 2] = 0;
+      sys.pos[i * 3 + 1] = -999;
+      sys.col[i * 3] = sys.col[i * 3 + 1] = sys.col[i * 3 + 2] = 0;
       continue;
     }
     d.ang += d.va * dt;
     d.h += d.vh * dt;
     const rr = d.rad * (1 + d.h * 0.5);   // 上に行くほど少し広がる
-    vortexPos[i * 3]     = bx + Math.cos(d.ang) * rr;
-    vortexPos[i * 3 + 1] = by + 0.05 + d.h;
-    vortexPos[i * 3 + 2] = bz + Math.sin(d.ang) * rr;
+    sys.pos[i * 3]     = bx + Math.cos(d.ang) * rr;
+    sys.pos[i * 3 + 1] = by + 0.05 + d.h;
+    sys.pos[i * 3 + 2] = bz + Math.sin(d.ang) * rr;
     const k = d.life / d.maxLife;
-    vortexCol[i * 3]     = 0.72 * k;   // 白〜水色系
-    vortexCol[i * 3 + 1] = 0.90 * k;
-    vortexCol[i * 3 + 2] = 1.00 * k;
+    sys.col[i * 3]     = sys.rgb[0] * k;
+    sys.col[i * 3 + 1] = sys.rgb[1] * k;
+    sys.col[i * 3 + 2] = sys.rgb[2] * k;
   }
-  vortexGeo.attributes.position.needsUpdate = true;
-  vortexGeo.attributes.color.needsUpdate = true;
+  sys.geo.attributes.position.needsUpdate = true;
+  sys.geo.attributes.color.needsUpdate = true;
+}
+
+function updateVortex(dt){
+  if (!fighters) return;
+  updateVortexSys(vortexP, fighters.player, currentBoostMult(), dt);
+  updateVortexSys(vortexC, fighters.cpu, cpuBoostMult(), dt);
 }
 
 /* --- 画面シェイクとヒットストップ --- */
@@ -946,7 +1019,7 @@ function showScreen(name){
 }
 
 /* ================= 組み立て画面 ================= */
-const selection = { axis:'normal', body:'konara', option:'none' };
+const selection = { pants:'uroko', body:'maru', option:'none' };
 let previewTop = null;
 
 function refreshPreview(){
@@ -999,7 +1072,7 @@ function buildChips(containerId, defs, key){
     wrap.appendChild(btn);
   }
 }
-buildChips('chips-axis', AXES, 'axis');
+buildChips('chips-pants', PANTS, 'pants');
 buildChips('chips-body', BODIES, 'body');
 buildChips('chips-option', OPTIONS, 'option');
 
@@ -1050,6 +1123,9 @@ const powerBarWrap = document.getElementById('power-bar-wrap');
 const boostGaugeWrap = document.getElementById('boost-gauge-wrap');
 const boostGaugeFill = document.getElementById('boost-gauge-fill');
 const boostRow       = document.getElementById('boost-row');
+const boostGaugeWrapC = document.getElementById('boost-gauge-wrap-cpu');
+const boostGaugeFillC = document.getElementById('boost-gauge-fill-cpu');
+const boostRowC       = document.getElementById('boost-row-cpu');
 const demoExitBtn  = document.getElementById('demo-exit-btn');
 const resultBtns   = document.getElementById('result-btns');
 const resultScreen = document.getElementById('screen-result');
@@ -1064,11 +1140,16 @@ let fightTime = 0, cpuTimer = -1;
 let tension = 0;            // 相殺で貯まるテンション（引き寄せの強さ）
 let drawCount = 0;          // 相殺回数（試合中永続。エスカレーションのカウンタ）
 let paceMult = 1;           // 相殺で上がる移動速度の倍率（両コマ共通・試合中永続）
-let boostStartT = -1;       // ブーストを発動した時刻（タップ発動）
-let boostEndT = -1;         // ブーストの発動が切れる時刻（boostStartT + BOOST_DURATION）
-let boostGauge = BOOST_GAUGE_MAX;  // ブーストゲージの残り（秒）。発動中は残り発動時間に連動し、切れたら0から回復する
-let boostCanUse = true;     // ブーストを再使用できる状態か（回復＋クールタイム完了で true）
-let boostFullT = -1;        // ゲージがMaxまで回復した時刻（クールタイムの起点。未回復なら -1）
+/* ブーストの状態はプレイヤー側とCPU側で分けて個別に管理する。
+   startT: 発動した時刻（タップ／AI発動）、endT: 発動が切れる時刻（startT + BOOST_DURATION）、
+   gauge: ゲージの残り（秒）。発動中は残り発動時間に連動し、切れたら0から回復する、
+   canUse: 再使用できる状態か（回復＋クールタイム完了で true）、
+   fullT: ゲージがMaxまで回復した時刻（クールタイムの起点。未回復なら -1） */
+function makeBoostState(){
+  return { startT: -1, endT: -1, gauge: BOOST_GAUGE_MAX, canUse: true, fullT: -1 };
+}
+let boostP = makeBoostState();   // fighters.player 用（デモ対戦ではCPU1）
+let boostC = makeBoostState();   // fighters.cpu 用（デモ対戦ではCPU2）
 let dyingCounter = 0;       // 瀕死になった順序の採番（どちらが先に瀕死になったかの記録用）
 let firstClash = false;     // 初接触が済んだかどうか（序盤ブーストの終了条件）
 let tapTimes = [];          // プレイヤーのタップ時刻（performance.now系）
@@ -1083,7 +1164,7 @@ function randomBuild(){
     const keys = Object.keys(obj);
     return keys[Math.floor(Math.random() * keys.length)];
   };
-  return { axis:pick(AXES), body:pick(BODIES), option:pick(OPTIONS) };
+  return { pants:pick(PANTS), body:pick(BODIES), option:pick(OPTIONS) };
 }
 
 function makeFighter(sel, side){
@@ -1113,11 +1194,14 @@ function startBattle(pBuild = selection){
   phase = 'ready'; charging = false; power = 0; fightTime = 0; cpuTimer = -1;
   tension = 0; firstClash = false; tapTimes = []; pendingClash = null; feedbackUntil = 0;
   drawCount = 0; paceMult = 1;
-  boostStartT = -1; boostEndT = -1;
-  boostGauge = BOOST_GAUGE_MAX; boostCanUse = true; boostFullT = -1;
+  boostP = makeBoostState();
+  boostC = makeBoostState();
   boostGaugeWrap.classList.remove('using', 'recovering', 'cooldown', 'ready-flash');
   boostGaugeFill.style.width = '100%';
   boostRow.style.display = 'none';
+  boostGaugeWrapC.classList.remove('using', 'recovering', 'cooldown', 'ready-flash');
+  boostGaugeFillC.style.width = '100%';
+  boostRowC.style.display = 'none';
   dyingCounter = 0;
   clashMsg.textContent = '';
   timingRing.classList.remove('good', 'draw', 'bad');
@@ -1235,9 +1319,12 @@ function resolvePendingClash(){
                        : tapTimes.some(t => Math.abs(t - pc.t) <= TAP_WINDOW);
   const cOK = Math.random() < (demoMode ? DEMO_JUST_RATE : CPU_TAP_RATE);
   // ブースト発動中に解決した衝突は、ジャストの勝敗ダメージが BOOST_DMG 倍になる
-  // （勝てば大きく与え、負ければ大きく受ける）。
+  // （勝てば大きく与え、負ければ大きく受ける）。両者のブーストは対称に効く：
+  // 勝ち側の発動で「与える」が倍、負け側の発動で「受ける」が倍になり、
+  // 両者とも発動中なら合計4倍になる。
   // 発動が切れていれば、速度の減衰が残っていてもダメージは通常に戻る
-  const boostRisk = boostDmgActive();
+  const pBoost = boostActiveOf(boostP);
+  const cBoost = boostActiveOf(boostC);
   // 瀕死のコマが関わる衝突は、通常の結果適用より先に決着／復活を判定する。
   // 瀕死側がジャストできれば復活して、この衝突は通常どおり解決する。
   // 瀕死側がジャストできなければ、その場で決着する
@@ -1248,10 +1335,14 @@ function resolvePendingClash(){
       // 両者とも瀕死で両方失敗：先に瀕死になった方（dyingSeqが小さい方）の負け
       return endBattle(P.dyingSeq > C.dyingSeq, 'finish');
     }
-    if (pFail){ spawnBurst(P.x, P.z, 0xff4040); return endBattle(false, 'finish'); }
+    if (pFail){
+      // CPUがジャストでとどめを刺した場合は赤（CPUのブースト中なら特大）
+      spawnCpuJustBurst(P.x, P.z, cBoost && cOK);
+      return endBattle(false, 'finish');
+    }
     if (cFail){
       // プレイヤーがジャスト成功してとどめを刺した場合は青（ブースト中なら特大）
-      if (pOK) spawnJustBurst(C.x, C.z, boostRisk);
+      if (pOK) spawnJustBurst(C.x, C.z, pBoost);
       return endBattle(true, 'finish');
     }
     if (P.dying) reviveFighter(P);
@@ -1307,18 +1398,18 @@ function resolvePendingClash(){
     showClash('draw', '相殺！');
   } else if (pOK){
     C.fails++;
-    C.spin -= pc.dmgToC * CLASH_WIN_DMG * (boostRisk ? BOOST_DMG : 1);
+    C.spin -= pc.dmgToC * CLASH_WIN_DMG * (pBoost ? BOOST_DMG : 1) * (cBoost ? BOOST_DMG : 1);
     pushLoser(C, P);
     triggerClashFX(C.x, C.z, 0.85, true);
-    spawnJustBurst(C.x, C.z, boostRisk);   // プレイヤーのジャスト成功＝青
+    spawnJustBurst(C.x, C.z, pBoost);   // プレイヤーのジャスト成功＝青
     addHitstop(0.08);
     showClash('good', 'ジャスト！');
   } else if (cOK){
     P.fails++;
-    P.spin -= pc.dmgToP * CLASH_WIN_DMG * (boostRisk ? BOOST_DMG : 1);
+    P.spin -= pc.dmgToP * CLASH_WIN_DMG * (cBoost ? BOOST_DMG : 1) * (pBoost ? BOOST_DMG : 1);
     pushLoser(P, C);
     triggerClashFX(P.x, P.z, 0.85, true);
-    spawnBurst(P.x, P.z, 0xff4040);   // CPUのジャスト成功（プレイヤー失敗）＝赤
+    spawnCpuJustBurst(P.x, P.z, cBoost);   // CPUのジャスト成功（プレイヤー失敗）＝赤。CPUのブースト中は特大
     addHitstop(0.08);
     showClash('bad', '失敗…');
   } else {
@@ -1331,8 +1422,8 @@ function resolvePendingClash(){
 
 /* 物理の1ステップ（stepBattle からサブステップで複数回呼ばれる）。
    力（斜面・周回ドライブ・押し出し・引き寄せ）はブースト前のスケールで計算し、
-   ブーストで変わるのはプレイヤーの摩擦の弱さと遠心力補正だけ */
-function stepPhysics(sdt, boostMult){
+   ブーストで変わるのはそのコマの摩擦の弱さと遠心力補正だけ（両者対称） */
+function stepPhysics(sdt, multP, multC){
   const P = fighters.player, C = fighters.cpu;
 for (const f of [P, C]){
   if (!f.launched) continue;
@@ -1340,7 +1431,8 @@ for (const f of [P, C]){
   // ブースト倍率は力（周回ドライブ・最低速度の押し出し）には掛けない。
   // ブーストで変わるのは摩擦の弱さと遠心力補正だけにして、「速さだけが変わる」形にする
   const spdScale = paceMult * f.stats.spdMult;
-  const isBoosting = (f === P && boostMult > 1);
+  const fMult = (f === P) ? multP : multC;   // このコマ自身のブースト倍率
+  const isBoosting = fMult > 1;
   // スピン減衰（ステータスに依存しない一定値）
   f.spin -= SPIN_DECAY * sdt;
   const d = Math.hypot(f.x, f.z);
@@ -1366,15 +1458,15 @@ for (const f of [P, C]){
     if (fade > 0){
       const v2 = f.vx * f.vx + f.vz * f.vz;
       const dEff = Math.max(d, 2.5);
-      const aCent = Math.min((v2 / dEff) * (1 - 1 / (boostMult * boostMult)) * fade, 30);
+      const aCent = Math.min((v2 / dEff) * (1 - 1 / (fMult * fMult)) * fade, 30);
       f.vx -= (f.x / d) * aCent * sdt;
       f.vz -= (f.z / d) * aCent * sdt;
     }
   }
   // 摩擦（旧0.5→0.22に弱めて、滑りが長続きするように）。
-  // ブースト中はプレイヤーだけ摩擦係数を 1/N に弱める：力はブースト前のまま、
+  // ブースト中はそのコマだけ摩擦係数を 1/N に弱める：力はブースト前のまま、
   // 減衰だけが弱くなるので、到達速度がおよそ N 倍まで伸びる
-  const fr = Math.exp(-BASE_FRICTION / (isBoosting ? boostMult : 1) * sdt);
+  const fr = Math.exp(-BASE_FRICTION / (isBoosting ? fMult : 1) * sdt);
   f.vx *= fr; f.vz *= fr;
   // 静止させない：進行方向を曲げて土俵を周回させる力＋最低速度の維持。
   // 移動の挙動はスピン量に依存しない（スピン0＝瀕死でも今まで通り動き回る）。
@@ -1401,7 +1493,7 @@ for (const f of [P, C]){
   // 速度の上限（斜面加速での暴走防止）
   {
     const spd = Math.hypot(f.vx, f.vz);
-    const cap = 13 * spdScale * (isBoosting ? boostMult : 1);   // 安全弁。到達速度そのものは摩擦の仕組み側で決まる
+    const cap = 13 * spdScale * (isBoosting ? fMult : 1);   // 安全弁。到達速度そのものは摩擦の仕組み側で決まる
     if (spd > cap){ f.vx *= cap / spd; f.vz *= cap / spd; }
   }
   // ※フラつきの速度ノイズは廃止した（軌道を乱していたため）。
@@ -1436,16 +1528,17 @@ if (tension > 0 && P.launched && C.launched){
   }
 }
 
-// ブースト中の引き寄せ：プレイヤーのブーストで速度が上がっている間だけ、
-// 自コマが相手方向へ強く引かれ、軌道が相手に向かってはっきり曲がる。
+// ブースト中の引き寄せ：ブーストで速度が上がっている間だけ、そのコマが
+// 相手方向へ強く引かれ、軌道が相手に向かってはっきり曲がる（両者対称）。
 // 強さはブースト倍率の進み具合（(倍率-1)/(設定倍率-1)）に比例させるので、
-// 維持・減衰フェーズでは弱まりながら消えていく
-if (!demoMode && boostMult > 1 && P.launched && C.launched){
-  const dx = C.x - P.x, dz = C.z - P.z;
+// 減衰フェーズでは弱まりながら消えていく
+for (const [f, o, m] of [[P, C, multP], [C, P, multC]]){
+  if (m <= 1 || !f.launched || !o.launched) continue;
+  const dx = o.x - f.x, dz = o.z - f.z;
   const d = Math.hypot(dx, dz);
   if (d > 0.01){
-    const a = BOOST_PULL * (boostMult - 1) / Math.max(0.001, BOOST_MULT - 1) * sdt;
-    P.vx += (dx / d) * a; P.vz += (dz / d) * a;
+    const a = BOOST_PULL * (m - 1) / Math.max(0.001, BOOST_MULT - 1) * sdt;
+    f.vx += (dx / d) * a; f.vz += (dz / d) * a;
   }
 }
 
@@ -1510,21 +1603,26 @@ function stepBattle(dt){
   resolvePendingClash();
   if (phase !== 'fight') return;   // 衝突の解決で決着した場合はここで止める
   markDying();   // 衝突ダメージでスピンが0になったコマを瀕死として記録する
-  updateBoostGauge(dt);   // ブーストゲージの消費・回復・クールタイムを進める
+  updateBoostGauges(dt);   // 両者分のブーストゲージの消費・回復・クールタイムを進める
 
   if (cpuTimer > 0){
     cpuTimer -= dt;
     if (cpuTimer <= 0) launchFighter(C, CPU_START_HOUR, CPU_TARGET_HOUR, 45 + Math.random() * 50);
   }
 
-  const boostMult = currentBoostMult();   // プレイヤーのブースト倍率（このフレームの値）
+  // CPUのブーストAI：使用可能なら接近状況を見て確率で発動する
+  // （デモ対戦では player 側のCPU1も同じAIでブーストを使う）
+  tryCpuBoost(C, P, boostC, dt);
+  if (demoMode) tryCpuBoost(P, C, boostP, dt);
+
+  const multP = currentBoostMult(), multC = cpuBoostMult();   // 両者のブースト倍率（このフレームの値）
   // サブステップ分割：高速移動時に相手をすり抜けて接触判定が飛ばないよう、
   // 1サブステップあたりの移動量が接触距離の半分以下になるよう積分を分割する
   const maxSpd = Math.max(Math.hypot(P.vx, P.vz), Math.hypot(C.vx, C.vz));
   const contactDist = P.stats.radius + C.stats.radius;
   const nSub = Math.min(48, Math.max(1, Math.ceil(maxSpd * dt / (contactDist * 0.5))));
   const sdt = dt / nSub;
-  for (let sub = 0; sub < nSub; sub++) stepPhysics(sdt, boostMult);
+  for (let sub = 0; sub < nSub; sub++) stepPhysics(sdt, multP, multC);
   // 瀕死の記録：スピンが0になっても試合は終わらない（決着は次の接触で決まる）
   markDying();
   // 制限時間（保険）：残りスピンが多い方の勝ち。
@@ -1606,13 +1704,7 @@ launchBtn.addEventListener('pointerdown', e => {
     // BOOST_DURATION 秒（固定）発動し続ける。途中で止めることはできない。
     // 一度使うと、ゲージがMaxまで回復してクールタイムが終わるまでは再使用できない
     // （発動中・回復中・クールタイム中のタップは何も起きない）
-    if (boostCanUse){
-      boostCanUse = false;
-      boostFullT = -1;
-      boostStartT = nowS();
-      boostEndT = boostStartT + BOOST_DURATION;
-      boostGauge = BOOST_GAUGE_MAX;
-    }
+    if (boostP.canUse) activateBoost(boostP);
   }
 });
 /* 両コマを同時に発射してバトルを開始する（通常モード・デモ対戦で共用） */
@@ -1634,48 +1726,89 @@ function releaseLaunch(){
 window.addEventListener('pointerup', releaseLaunch);
 window.addEventListener('pointercancel', releaseLaunch);
 
-/* --- ブーストの状態遷移 ---
-   タップで発動し、BOOST_DURATION 秒の間は BOOST_MULT。
+/* --- ブーストの状態遷移（プレイヤー側・CPU側とも同じ仕様で対称） ---
+   発動し、BOOST_DURATION 秒の間は BOOST_MULT。
    発動が切れたら続く BOOST_FADE 秒で通常速度（×1.0）へ戻る */
-function currentBoostMult(){
-  if (demoMode || phase !== 'fight') return 1;
+function boostMultOf(bs){
+  if (phase !== 'fight') return 1;
   const now = nowS();
-  if (now < boostEndT) return BOOST_MULT;   // 発動中
-  if (boostEndT >= 0 && now - boostEndT < BOOST_FADE)
-    return 1 + (BOOST_MULT - 1) * (1 - (now - boostEndT) / BOOST_FADE);
+  if (now < bs.endT) return BOOST_MULT;   // 発動中
+  if (bs.endT >= 0 && now - bs.endT < BOOST_FADE)
+    return 1 + (BOOST_MULT - 1) * (1 - (now - bs.endT) / BOOST_FADE);
   return 1;
 }
+function currentBoostMult(){ return boostMultOf(boostP); }   // プレイヤー側
+function cpuBoostMult(){ return boostMultOf(boostC); }       // CPU側
 
-/* ダメージ倍率（BOOST_DMG）が有効かどうか。
-   発動中はずっと有効で、発動が切れた瞬間に（速度の減衰が残っていても）
-   ダメージ倍率は通常に戻る */
-function boostDmgActive(){
-  if (demoMode || phase !== 'fight') return false;
-  return nowS() < boostEndT;
+/* ブーストを発動させる（プレイヤーはタップ、CPUはAIが呼ぶ）。発動でゲージは全消費扱い */
+function activateBoost(bs){
+  bs.canUse = false;
+  bs.fullT = -1;
+  bs.startT = nowS();
+  bs.endT = bs.startT + BOOST_DURATION;
+  bs.gauge = BOOST_GAUGE_MAX;
 }
 
-/* --- ブーストゲージの消費・回復・クールタイム ---
+/* ダメージ倍率（BOOST_DMG）が有効かどうかは状態ごと：発動中はずっと有効で、
+   発動が切れた瞬間に（速度の減衰が残っていても）ダメージ倍率は通常に戻る */
+function boostActiveOf(bs){
+  return phase === 'fight' && nowS() < bs.endT;
+}
+function boostDmgActive(){ return boostActiveOf(boostP); }   // プレイヤー側
+
+/* --- ブーストゲージの消費・回復・クールタイム（状態ごと） ---
    発動するとゲージは全消費扱い：発動中は残り発動時間に連動して5秒分が減っていき、
    切れた時点で0になる。回復は発動が切れてから進み、全消費なので
    BOOST_GAUGE_MAX × BOOST_RECOVER_RATE 秒（7.5秒）で全回復する。
    ゲージがMaxに戻ってから BOOST_COOLDOWN 秒経つまで再使用できない */
-function updateBoostGauge(dt){
-  if (demoMode || phase !== 'fight') return;
-  if (nowS() < boostEndT){
+function updateBoostState(bs, dt, wrapEl){
+  if (nowS() < bs.endT){
     // 発動中：ゲージは残り発動時間そのもの
-    boostGauge = Math.max(0, boostEndT - nowS());
-  } else if (boostGauge < BOOST_GAUGE_MAX){
-    boostGauge = Math.min(BOOST_GAUGE_MAX, boostGauge + dt / BOOST_RECOVER_RATE);
-    if (boostGauge >= BOOST_GAUGE_MAX && boostFullT < 0) boostFullT = nowS();
+    bs.gauge = Math.max(0, bs.endT - nowS());
+  } else if (bs.gauge < BOOST_GAUGE_MAX){
+    bs.gauge = Math.min(BOOST_GAUGE_MAX, bs.gauge + dt / BOOST_RECOVER_RATE);
+    if (bs.gauge >= BOOST_GAUGE_MAX && bs.fullT < 0) bs.fullT = nowS();
   }
-  if (!boostCanUse && boostFullT >= 0 && nowS() - boostFullT >= BOOST_COOLDOWN){
-    boostCanUse = true;
-    boostFullT = -1;
-    // 使えるようになった合図：ゲージの枠を一度だけ光らせる
-    boostGaugeWrap.classList.remove('ready-flash');
-    void boostGaugeWrap.offsetWidth;
-    boostGaugeWrap.classList.add('ready-flash');
+  if (!bs.canUse && bs.fullT >= 0 && nowS() - bs.fullT >= BOOST_COOLDOWN){
+    bs.canUse = true;
+    bs.fullT = -1;
+    // 使えるようになった合図：その側のゲージの枠を一度だけ光らせる
+    wrapEl.classList.remove('ready-flash');
+    void wrapEl.offsetWidth;
+    wrapEl.classList.add('ready-flash');
   }
+}
+function updateBoostGauges(dt){
+  if (phase !== 'fight') return;
+  updateBoostState(boostP, dt, boostGaugeWrap);
+  updateBoostState(boostC, dt, boostGaugeWrapC);
+}
+
+/* --- CPUのブーストAI ---
+   使用可能になった後、相手との距離と接近状況を見て、毎秒 rate の確率で発動する
+   （フレームごとに rate×dt を引くので、発動タイミングは自然にばらける）。
+   発動条件：両者発射済みで、相手に接近中（相対速度が近づく向き）か、距離が近い（中心間3.5未満）。
+   相手が瀕死ならとどめを狙って finisher 倍、相手の残りスピンが25%以下でも2倍、
+   自分が瀕死なら被ダメージ2倍のリスクを避けて半分に下げる。
+   難易度で頻度を変える：イージー 0.05/秒（滅多に使わない）、ノーマル 0.25/秒、ハード 0.70/秒。
+   デモ対戦では両CPUともノーマル相当のAIを使う */
+const CPU_BOOST_AI = {
+  easy:   { rate: 0.05, finisher: 3 },
+  normal: { rate: 0.25, finisher: 4 },
+  hard:   { rate: 0.70, finisher: 5 },
+};
+function tryCpuBoost(f, o, bs, dt){
+  if (!bs.canUse || phase !== 'fight' || !f.launched || !o.launched) return;
+  const prof = CPU_BOOST_AI[demoMode ? 'normal' : difficulty];
+  const dx = o.x - f.x, dz = o.z - f.z;
+  const dist = Math.hypot(dx, dz);
+  const closing = (dx * (o.vx - f.vx) + dz * (o.vz - f.vz)) < 0;   // 相手に近づいているか
+  if (!closing && dist >= 3.5) return;
+  let rate = prof.rate;
+  if (o.dying) rate *= prof.finisher;                    // とどめ狙い
+  else if (o.spin <= o.stats.maxSpin * 0.25) rate *= 2;  // 追い詰めている
+  if (f.dying) rate *= 0.5;                              // 自分が瀕死なら慎重に
+  if (Math.random() < rate * dt) activateBoost(bs);
 }
 
 /* --- ブースト中の残像（簡素版） ---
@@ -1757,7 +1890,7 @@ function updateTrail(dt){
 /* --- 衝突タイミング用のタップ記録（バトル中、画面のどこでもよい） --- */
 window.addEventListener('pointerdown', e => {
   // ブーストボタン（と上部のブーストゲージ）上のポインタ操作はジャスト判定のタップとして記録しない
-  if (e.target.closest && e.target.closest('#launch-btn, #boost-gauge-wrap')) return;
+  if (e.target.closest && e.target.closest('#launch-btn, #boost-gauge-wrap, #boost-gauge-wrap-cpu')) return;
   if (screen === 'battle' && phase === 'fight') tapTimes.push(nowS());
 });
 
@@ -1792,22 +1925,28 @@ function updateBoostBtn(){
 }
 
 /* --- ブーストゲージの表示 ---
-   バトル中（デモ以外）だけ画面上部（プレイヤーの体力ゲージの下）に行を出し、
+   バトル中は画面上部（各体力ゲージの下）に両者分の行を出し、
    残量と状態を色で示す：発動中＝赤系で減っていく／回復中＝青灰で戻っていく
    （ボタンは無効表示）／クールタイム中＝金で満タン表示だがまだ無効／使用可能＝橙で満タン。
+   デモ対戦でも両CPUのゲージを同じ形で出す（実戦に近い見た目にするため）。
    発動中はボタンの赤表示を薄めないよう、ボタン自体の無効化はしない
    （発動中のタップはハンドラ側で無視される） */
+function updateBoostRowUI(bs, rowEl, wrapEl, fillEl){
+  fillEl.style.width = (bs.gauge / BOOST_GAUGE_MAX * 100) + '%';
+  const active = nowS() < bs.endT;
+  wrapEl.classList.toggle('using', active);
+  wrapEl.classList.toggle('recovering', !active && !bs.canUse && bs.gauge < BOOST_GAUGE_MAX);
+  wrapEl.classList.toggle('cooldown', !bs.canUse && bs.gauge >= BOOST_GAUGE_MAX);
+}
 function updateBoostGaugeUI(){
-  const show = !demoMode && phase === 'fight';
+  const show = phase === 'fight';
   boostRow.style.display = show ? 'flex' : 'none';
+  boostRowC.style.display = show ? 'flex' : 'none';
   if (!show) return;
-  boostGaugeFill.style.width = (boostGauge / BOOST_GAUGE_MAX * 100) + '%';
-  const active = nowS() < boostEndT;
-  boostGaugeWrap.classList.toggle('using', active);
-  boostGaugeWrap.classList.toggle('recovering', !active && !boostCanUse && boostGauge < BOOST_GAUGE_MAX);
-  boostGaugeWrap.classList.toggle('cooldown', !boostCanUse && boostGauge >= BOOST_GAUGE_MAX);
+  updateBoostRowUI(boostP, boostRow, boostGaugeWrap, boostGaugeFill);
+  updateBoostRowUI(boostC, boostRowC, boostGaugeWrapC, boostGaugeFillC);
   // 回復中・クールタイム中はボタンを無効表示にする（発動中は赤表示を優先して無効化しない）
-  launchBtn.disabled = !boostCanUse && !boostDmgActive();
+  launchBtn.disabled = !boostP.canUse && !boostDmgActive();
 }
 
 /* --- タイミング円の表示更新 --- */
