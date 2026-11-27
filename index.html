@@ -12,7 +12,10 @@
     --panel:rgba(255,250,238,.96);
     --line:#d8c49a;
   }
-  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent;
+     user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
+  /* デバッグ用の数値入力欄だけは通常どおり入力・選択できるようにする */
+  input{ user-select:text; -webkit-user-select:text; -webkit-touch-callout:default; }
   html,body{ height:100%; }
   body{
     margin:0; color:var(--ink); overflow:hidden; overscroll-behavior:none;
@@ -1247,12 +1250,22 @@ for (const f of [P, C]){
   // 遠心力の補正（ブースト中のみ）：速くなった分だけ軌道が外に膨らむのを防ぐ内向き加速度。
   // 半径 d の円軌道に必要な向心加速度 v^2/d のうち、ブースト前の等価速度 (v/N) の分は
   // 斜面とドライブがまかなう前提で、不足分 (1 - 1/N^2) だけを補う。
-  // これでブースト前と同じくらいのラインを速く回れる
-  if (isBoosting && d > 0.5){
-    const v2 = f.vx * f.vx + f.vz * f.vz;
-    const aCent = (v2 / d) * (1 - 1 / (boostMult * boostMult));
-    f.vx -= (f.x / d) * aCent * sdt;
-    f.vz -= (f.z / d) * aCent * sdt;
+  // ただし補正は「外に膨らむのを抑える」ためだけに使い、中心付近では効かせない：
+  // 以前の形だと d が小さい場所で補正が過大になり、中心に吸い付いて小さな円を
+  // 描き続けてしまった。そこで
+  //   ・d<=1.5 で補正ゼロ、d>=3.5 でフル、その間は smoothstep で滑らかにフェード
+  //   ・割る距離には下限 2.5 を設ける
+  //   ・補正加速度自体に上限 30 を設ける
+  if (isBoosting && d > 0.01){
+    const fadeT = Math.min(1, Math.max(0, (d - 1.5) / (3.5 - 1.5)));
+    const fade = fadeT * fadeT * (3 - 2 * fadeT);
+    if (fade > 0){
+      const v2 = f.vx * f.vx + f.vz * f.vz;
+      const dEff = Math.max(d, 2.5);
+      const aCent = Math.min((v2 / dEff) * (1 - 1 / (boostMult * boostMult)) * fade, 30);
+      f.vx -= (f.x / d) * aCent * sdt;
+      f.vz -= (f.z / d) * aCent * sdt;
+    }
   }
   // 摩擦（旧0.5→0.22に弱めて、滑りが長続きするように）。
   // ブースト中はプレイヤーだけ摩擦係数を 1/N に弱める：力はブースト前のまま、
