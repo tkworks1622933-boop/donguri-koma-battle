@@ -96,11 +96,13 @@
   #launch-btn:disabled{ opacity:.45; box-shadow:none; }
   #launch-btn.boosting{ background:#d23c1e; box-shadow:0 4px 0 #8e2412, 0 8px 18px rgba(110,69,32,.3); }
   #launch-btn.boost-keep{ background:#e86a1e; box-shadow:0 4px 0 #a8561c, 0 8px 18px rgba(110,69,32,.3); }
-  /* ブーストゲージ（ボタンの下の細いバー）。状態でフィル色を変える：
+  /* ブーストゲージ（画面上部、プレイヤーの体力ゲージの下の細いバー。
+     下部のボタン操作で指に隠れないよう上部に置く）。状態でフィル色を変える：
      使用中＝赤系、回復中＝くすんだ青灰、クールタイム中（Maxだが待ち）＝金、
      使用可能＝通常の橙グラデーション */
-  #boost-gauge-wrap{ width:82%; max-width:340px; height:9px; background:rgba(255,253,246,.8);
-    border:2px solid var(--line); border-radius:5px; overflow:hidden; display:none; }
+  #boost-gauge-wrap{ flex:1; height:8px; background:rgba(255,253,246,.8);
+    border:2px solid var(--line); border-radius:5px; overflow:hidden; }
+  #boost-row .hname{ width:44px; font-size:10px; }
   #boost-gauge-fill{ height:100%; width:100%; background:linear-gradient(90deg,#e8a34c,#cf6f2a);
     transition:width .1s linear; }
   #boost-gauge-wrap.using #boost-gauge-fill{ background:linear-gradient(90deg,#e86a1e,#d23c1e); }
@@ -176,6 +178,7 @@
 <div id="screen-battle" class="screen">
   <div id="hud">
     <div class="hud-row"><span class="hname" id="name-player">あなた</span><div class="bar"><div class="fill" id="spin-player"></div></div></div>
+    <div class="hud-row" id="boost-row" style="display:none"><span class="hname">ブースト</span><div id="boost-gauge-wrap"><div id="boost-gauge-fill"></div></div></div>
     <div class="hud-row"><span class="hname" id="name-cpu">CPU</span><div class="bar"><div class="fill" id="spin-cpu"></div></div></div>
   </div>
   <div id="power-wrap">
@@ -183,7 +186,6 @@
     <div id="battle-msg"></div>
     <div id="power-bar-wrap"><div id="power-fill"></div></div>
     <button id="launch-btn" class="btn">長押しでパワー</button>
-    <div id="boost-gauge-wrap"><div id="boost-gauge-fill"></div></div>
     <button id="demo-exit-btn" class="btn sub" style="display:none">タイトルへ</button>
   </div>
 </div>
@@ -427,11 +429,10 @@ const PACE_STEP = 0.10;     // 相殺1回ごとのペース倍率の上昇（+10
 const PACE_CAP = 2.0;       // ペース倍率の上限
 /* --- ブーストボタン（プレイヤー専用） --- */
 let BOOST_MULT = 30;        // ブースト倍率（デバッグ入力の初期値）。効き方は「摩擦を 1/N に弱める＋遠心力補正」で、力そのものには掛からない。組み立て画面のデバッグ入力で上書きされる
-const BOOST_KEEP = 1.5;     // ボタンを離した後もブースト速度を維持する秒数
-const BOOST_FADE = 1.0;     // その後、通常速度へ戻るまでにかける秒数
-const BOOST_DMG = 2;        // ブースト受付時間内にジャストの勝敗がついたときのダメージ倍率
-const BOOST_DMG_WINDOW = 0.3;  // ダメージ倍率が有効な受付時間（押下中＋離してからこの秒数以内）
-const BOOST_GAUGE_MAX = 5.0;   // ブーストゲージの容量（ブースト使用できる秒数）
+const BOOST_FADE = 1.0;     // 発動が切れた後、通常速度へ戻るまでにかける秒数
+const BOOST_DMG = 2;        // ブースト発動中にジャストの勝敗がついたときのダメージ倍率（発動中ずっと有効）
+const BOOST_GAUGE_MAX = 5.0;   // ブーストゲージの容量（発動で全消費する）
+const BOOST_DURATION = BOOST_GAUGE_MAX;  // ブーストの発動時間（固定・プレイヤーは調整できない）。発動でゲージ全消費なので容量と同じ5秒
 const BOOST_RECOVER_RATE = 1.5;  // ゲージ回復の遅さ（減った分のこの倍の時間をかけて戻る）
 const BOOST_COOLDOWN = 1.0;    // ゲージがMaxに戻ってから再使用できるまでの秒数
 const BOOST_PULL = 6.0;        // ブースト中の引き寄せ加速度（フルブースト時・相手方向。テンション最大4.0や序盤ブースト1.5より強い）
@@ -945,6 +946,7 @@ const nameC      = document.getElementById('name-cpu');
 const powerBarWrap = document.getElementById('power-bar-wrap');
 const boostGaugeWrap = document.getElementById('boost-gauge-wrap');
 const boostGaugeFill = document.getElementById('boost-gauge-fill');
+const boostRow       = document.getElementById('boost-row');
 const demoExitBtn  = document.getElementById('demo-exit-btn');
 const resultBtns   = document.getElementById('result-btns');
 const resultScreen = document.getElementById('screen-result');
@@ -959,10 +961,9 @@ let fightTime = 0, cpuTimer = -1;
 let tension = 0;            // 相殺で貯まるテンション（引き寄せの強さ）
 let drawCount = 0;          // 相殺回数（試合中永続。エスカレーションのカウンタ）
 let paceMult = 1;           // 相殺で上がる移動速度の倍率（両コマ共通・試合中永続）
-let boostHeld = false;      // ブーストボタンを押しているか
-let boostPointerId = null;  // ブーストを押したポインタのID（多点タッチでの誤解除防止）
-let boostReleaseT = -100;   // ブーストボタンを最後に離した時刻
-let boostGauge = BOOST_GAUGE_MAX;  // ブーストゲージの残り（秒）。押下中だけ減る
+let boostStartT = -1;       // ブーストを発動した時刻（タップ発動）
+let boostEndT = -1;         // ブーストの発動が切れる時刻（boostStartT + BOOST_DURATION）
+let boostGauge = BOOST_GAUGE_MAX;  // ブーストゲージの残り（秒）。発動中は残り発動時間に連動し、切れたら0から回復する
 let boostCanUse = true;     // ブーストを再使用できる状態か（回復＋クールタイム完了で true）
 let boostFullT = -1;        // ゲージがMaxまで回復した時刻（クールタイムの起点。未回復なら -1）
 let dyingCounter = 0;       // 瀕死になった順序の採番（どちらが先に瀕死になったかの記録用）
@@ -1009,11 +1010,11 @@ function startBattle(pBuild = selection){
   phase = 'ready'; charging = false; power = 0; fightTime = 0; cpuTimer = -1;
   tension = 0; firstClash = false; tapTimes = []; pendingClash = null; feedbackUntil = 0;
   drawCount = 0; paceMult = 1;
-  boostHeld = false; boostPointerId = null; boostReleaseT = -100;
+  boostStartT = -1; boostEndT = -1;
   boostGauge = BOOST_GAUGE_MAX; boostCanUse = true; boostFullT = -1;
   boostGaugeWrap.classList.remove('using', 'recovering', 'cooldown', 'ready-flash');
   boostGaugeFill.style.width = '100%';
-  boostGaugeWrap.style.display = 'none';
+  boostRow.style.display = 'none';
   dyingCounter = 0;
   clashMsg.textContent = '';
   timingRing.classList.remove('good', 'draw', 'bad');
@@ -1130,9 +1131,9 @@ function resolvePendingClash(){
   const pOK = demoMode ? Math.random() < DEMO_JUST_RATE
                        : tapTimes.some(t => Math.abs(t - pc.t) <= TAP_WINDOW);
   const cOK = Math.random() < (demoMode ? DEMO_JUST_RATE : CPU_TAP_RATE);
-  // ブースト受付時間内（押下中＋離してから BOOST_DMG_WINDOW 秒以内）に解決した衝突は、
-  // ジャストの勝敗ダメージが BOOST_DMG 倍になる（勝てば大きく与え、負ければ大きく受ける）。
-  // 速度の維持・減衰が残っていても、受付時間を過ぎていればダメージは通常に戻る
+  // ブースト発動中に解決した衝突は、ジャストの勝敗ダメージが BOOST_DMG 倍になる
+  // （勝てば大きく与え、負ければ大きく受ける）。
+  // 発動が切れていれば、速度の減衰が残っていてもダメージは通常に戻る
   const boostRisk = boostDmgActive();
   // 瀕死のコマが関わる衝突は、通常の結果適用より先に決着／復活を判定する。
   // 瀕死側がジャストできれば復活して、この衝突は通常どおり解決する。
@@ -1498,14 +1499,16 @@ launchBtn.addEventListener('pointerdown', e => {
   if (phase === 'ready'){
     charging = true; power = 0;
   } else if (phase === 'fight'){
-    // 発射後は同じボタンがブーストボタンとして働く。
+    // 発射後は同じボタンがブーストボタンとして働く。タップした瞬間に発動し、
+    // BOOST_DURATION 秒（固定）発動し続ける。途中で止めることはできない。
     // 一度使うと、ゲージがMaxまで回復してクールタイムが終わるまでは再使用できない
-    // （回復途中の継ぎ足し使用も不可）
-    if (boostCanUse && !boostHeld){
-      boostHeld = true;
-      boostPointerId = e.pointerId;
+    // （発動中・回復中・クールタイム中のタップは何も起きない）
+    if (boostCanUse){
       boostCanUse = false;
       boostFullT = -1;
+      boostStartT = nowS();
+      boostEndT = boostStartT + BOOST_DURATION;
+      boostGauge = BOOST_GAUGE_MAX;
     }
   }
 });
@@ -1529,53 +1532,35 @@ window.addEventListener('pointerup', releaseLaunch);
 window.addEventListener('pointercancel', releaseLaunch);
 
 /* --- ブーストの状態遷移 ---
-   押下中は BOOST_MULT。離すと BOOST_KEEP 秒はそのまま維持し、
-   続く BOOST_FADE 秒で通常速度（×1.0）へ戻る。維持・減衰中に再び押せば即ブーストに戻る */
+   タップで発動し、BOOST_DURATION 秒の間は BOOST_MULT。
+   発動が切れたら続く BOOST_FADE 秒で通常速度（×1.0）へ戻る */
 function currentBoostMult(){
   if (demoMode || phase !== 'fight') return 1;
-  if (boostHeld) return BOOST_MULT;
-  const since = nowS() - boostReleaseT;
-  if (since < BOOST_KEEP) return BOOST_MULT;
-  if (since < BOOST_KEEP + BOOST_FADE) return 1 + (BOOST_MULT - 1) * (1 - (since - BOOST_KEEP) / BOOST_FADE);
+  const now = nowS();
+  if (now < boostEndT) return BOOST_MULT;   // 発動中
+  if (boostEndT >= 0 && now - boostEndT < BOOST_FADE)
+    return 1 + (BOOST_MULT - 1) * (1 - (now - boostEndT) / BOOST_FADE);
   return 1;
 }
-/* ブーストの解除は、押したポインタが離れたときだけ（別の指のタップで誤って解除しない） */
-function releaseBoost(e){
-  if (boostHeld && e.pointerId === boostPointerId){
-    boostHeld = false;
-    boostPointerId = null;
-    boostReleaseT = nowS();
-  }
-}
-window.addEventListener('pointerup', releaseBoost);
-window.addEventListener('pointercancel', releaseBoost);
 
 /* ダメージ倍率（BOOST_DMG）が有効かどうか。
-   速度の維持（BOOST_KEEP）・減衰（BOOST_FADE）より受付は短く、
-   「押下中」と「離してから BOOST_DMG_WINDOW 秒以内」だけ有効。
-   受付を過ぎたら速度だけが残り、ダメージは通常に戻る */
+   発動中はずっと有効で、発動が切れた瞬間に（速度の減衰が残っていても）
+   ダメージ倍率は通常に戻る */
 function boostDmgActive(){
   if (demoMode || phase !== 'fight') return false;
-  if (boostHeld) return true;
-  return nowS() - boostReleaseT <= BOOST_DMG_WINDOW;
+  return nowS() < boostEndT;
 }
 
 /* --- ブーストゲージの消費・回復・クールタイム ---
-   容量は BOOST_GAUGE_MAX 秒分。減るのは押下中だけ（維持・減衰では減らない）。
-   ゲージが空になったらその場でブースト終了（ボタンを離したのと同じ扱いで、
-   受付時間→維持・減衰へ移る）。
-   回復は離している間ずっと進み、減った分の BOOST_RECOVER_RATE 倍の時間がかかる。
+   発動するとゲージは全消費扱い：発動中は残り発動時間に連動して5秒分が減っていき、
+   切れた時点で0になる。回復は発動が切れてから進み、全消費なので
+   BOOST_GAUGE_MAX × BOOST_RECOVER_RATE 秒（7.5秒）で全回復する。
    ゲージがMaxに戻ってから BOOST_COOLDOWN 秒経つまで再使用できない */
 function updateBoostGauge(dt){
   if (demoMode || phase !== 'fight') return;
-  if (boostHeld){
-    boostGauge -= dt;
-    if (boostGauge <= 0){
-      boostGauge = 0;
-      boostHeld = false;
-      boostPointerId = null;
-      boostReleaseT = nowS();
-    }
+  if (nowS() < boostEndT){
+    // 発動中：ゲージは残り発動時間そのもの
+    boostGauge = Math.max(0, boostEndT - nowS());
   } else if (boostGauge < BOOST_GAUGE_MAX){
     boostGauge = Math.min(BOOST_GAUGE_MAX, boostGauge + dt / BOOST_RECOVER_RATE);
     if (boostGauge >= BOOST_GAUGE_MAX && boostFullT < 0) boostFullT = nowS();
@@ -1668,17 +1653,17 @@ function updateTrail(dt){
 
 /* --- 衝突タイミング用のタップ記録（バトル中、画面のどこでもよい） --- */
 window.addEventListener('pointerdown', e => {
-  // ブーストボタン（とその下のゲージ）上のポインタ操作はジャスト判定のタップとして記録しない
+  // ブーストボタン（と上部のブーストゲージ）上のポインタ操作はジャスト判定のタップとして記録しない
   if (e.target.closest && e.target.closest('#launch-btn, #boost-gauge-wrap')) return;
   if (screen === 'battle' && phase === 'fight') tapTimes.push(nowS());
 });
 
 /* --- ブーストボタンの表示 ---
-   ダメージ倍率が有効な間（押下中＋離して BOOST_DMG_WINDOW 秒）＝赤（.boosting）、
-   受付を過ぎて速度だけが残っている維持フェーズ＝橙（.boost-keep）、
-   減衰フェーズ＝残り倍率の割合で維持色から通常色へ徐々に戻す。
+   ダメージ倍率が有効な間（＝発動中）＝赤（.boosting）、
+   発動が切れて速度だけが残っている減衰フェーズ＝残り倍率の割合で
+   減衰色から通常色へ徐々に戻す。
    色の切り替わりで「ダメージ倍率がまだ有効か」が読めるようにするための表示 */
-const BOOST_BTN_KEEP = new THREE.Color(0xe86a1e);   // 維持フェーズの色
+const BOOST_BTN_KEEP = new THREE.Color(0xe86a1e);   // 減衰フェーズの色
 const BOOST_BTN_BASE = new THREE.Color(0xcf6f2a);   // 通常色（--accent と同じ）
 const _boostBtnCol = new THREE.Color();
 function updateBoostBtn(){
@@ -1696,36 +1681,30 @@ function updateBoostBtn(){
     launchBtn.style.boxShadow = '';
     return;
   }
-  if (nowS() - boostReleaseT < BOOST_KEEP){
-    // 受付時間は過ぎたが速度は維持されているフェーズ＝橙
-    launchBtn.classList.add('boost-keep');
-    launchBtn.style.background = '';
-    launchBtn.style.boxShadow = '';
-  } else {
-    // 減衰フェーズ：倍率が通常へ戻るにつれて色も通常色へ
-    const k = (m - 1) / (BOOST_MULT - 1);
-    _boostBtnCol.copy(BOOST_BTN_BASE).lerp(BOOST_BTN_KEEP, k);
-    launchBtn.style.background = '#' + _boostBtnCol.getHexString();
-    launchBtn.style.boxShadow = '';
-  }
+  // 減衰フェーズ：倍率が通常へ戻るにつれて色も通常色へ
+  const k = (m - 1) / (BOOST_MULT - 1);
+  _boostBtnCol.copy(BOOST_BTN_BASE).lerp(BOOST_BTN_KEEP, k);
+  launchBtn.style.background = '#' + _boostBtnCol.getHexString();
+  launchBtn.style.boxShadow = '';
 }
 
 /* --- ブーストゲージの表示 ---
-   バトル中（デモ以外）だけボタンの下に細いバーを出し、残量と状態を色で示す：
-   使用中＝赤系で減っていく／回復中＝青灰で戻っていく（ボタンは無効表示）／
-   クールタイム中＝金で満タン表示だがまだ無効／使用可能＝橙で満タン。
-   ダメージ受付時間の間は、回復中でもボタン表示を優先するため無効化を遅らせる */
+   バトル中（デモ以外）だけ画面上部（プレイヤーの体力ゲージの下）に行を出し、
+   残量と状態を色で示す：発動中＝赤系で減っていく／回復中＝青灰で戻っていく
+   （ボタンは無効表示）／クールタイム中＝金で満タン表示だがまだ無効／使用可能＝橙で満タン。
+   発動中はボタンの赤表示を薄めないよう、ボタン自体の無効化はしない
+   （発動中のタップはハンドラ側で無視される） */
 function updateBoostGaugeUI(){
   const show = !demoMode && phase === 'fight';
-  boostGaugeWrap.style.display = show ? 'block' : 'none';
+  boostRow.style.display = show ? 'flex' : 'none';
   if (!show) return;
   boostGaugeFill.style.width = (boostGauge / BOOST_GAUGE_MAX * 100) + '%';
-  boostGaugeWrap.classList.toggle('using', boostHeld);
-  boostGaugeWrap.classList.toggle('recovering', !boostHeld && !boostCanUse && boostGauge < BOOST_GAUGE_MAX);
+  const active = nowS() < boostEndT;
+  boostGaugeWrap.classList.toggle('using', active);
+  boostGaugeWrap.classList.toggle('recovering', !active && !boostCanUse && boostGauge < BOOST_GAUGE_MAX);
   boostGaugeWrap.classList.toggle('cooldown', !boostCanUse && boostGauge >= BOOST_GAUGE_MAX);
-  // 回復中・クールタイム中はボタンを無効表示にする（ただしダメージ受付の赤表示を
-  // 薄めないよう、受付時間が終わってから無効化する）
-  if (!boostHeld) launchBtn.disabled = !boostCanUse && !boostDmgActive();
+  // 回復中・クールタイム中はボタンを無効表示にする（発動中は赤表示を優先して無効化しない）
+  launchBtn.disabled = !boostCanUse && !boostDmgActive();
 }
 
 /* --- タイミング円の表示更新 --- */
