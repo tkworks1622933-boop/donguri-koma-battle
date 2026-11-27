@@ -53,10 +53,10 @@
     background:#fffdf6; color:var(--ink); border:2px solid var(--line);
   }
   .chip.sel{ background:var(--accent); border-color:var(--accent); color:#fff; font-weight:700; }
-  .stats{ margin:12px 0 4px; display:grid; grid-template-columns:1fr 1fr; gap:5px 18px; }
+  .stats{ margin:12px 0 4px; display:grid; grid-template-columns:1fr; gap:5px 18px; }
   .stat{ display:flex; align-items:center; gap:8px; font-size:12px; }
-  .stat .slabel{ width:4.2em; color:#7a5a36; }
-  .stat .pips{ font-size:13px; letter-spacing:3px; line-height:1; }
+  .stat .slabel{ width:4.2em; flex:none; color:#7a5a36; }
+  .stat .pips{ font-size:10px; letter-spacing:1px; line-height:1.25; overflow-wrap:anywhere; }
   .stat .pips .on{ color:var(--accent); }
   .stat .pips .off{ color:#e0cda1; }
   #build-panel .btn{ width:100%; margin-top:12px; }
@@ -174,24 +174,25 @@ import * as THREE from 'three';
 
 /* ================= パーツ定義 =================
    st: こうげき(atk) / たいりょく(hp) / スピード(spd) への寄与。
-   同種パーツ同士は合計が全て同じ（軸=6、本体=9、オプション=3）で優劣はなく、配分だけが違う。
-   合計値に上限は設けず、そのまま係数に使う */
+   軸はどれも合計12、本体はどれも合計18で、同種パーツに優劣はなく配分だけが違う。
+   オプションは±0の付け替え（shift）：指定ステータスへ点を移動するだけで合計は変わらない。
+   よって、どの組み合わせでも3ステータスの合計は常に30になる */
 const AXES = {
-  normal: { name:'ふつう',   len:1.0,  r:0.050, mass:1.00, st:{ atk:2, hp:2, spd:2 } },
-  long:   { name:'ロング',   len:1.5,  r:0.050, mass:1.00, st:{ atk:1, hp:4, spd:1 } },
-  short:  { name:'ショート', len:0.62, r:0.050, mass:0.95, st:{ atk:4, hp:1, spd:1 } },
-  fat:    { name:'ふと軸',   len:1.0,  r:0.105, mass:1.30, st:{ atk:3, hp:3, spd:0 } },
+  normal: { name:'ふつう',   len:1.0,  r:0.050, mass:1.00, st:{ atk:4, hp:4, spd:4 } },
+  long:   { name:'ロング',   len:1.5,  r:0.050, mass:1.00, st:{ atk:2, hp:8, spd:2 } },
+  short:  { name:'ショート', len:0.62, r:0.050, mass:0.95, st:{ atk:2, hp:2, spd:8 } },
+  fat:    { name:'ふと軸',   len:1.0,  r:0.105, mass:1.30, st:{ atk:8, hp:2, spd:2 } },
 };
 const BODIES = {
-  maru: { name:'まる型', sx:1.00, sy:1.00, mass:1.00, st:{ atk:3, hp:3, spd:3 } },
-  hoso: { name:'ほそ型', sx:0.82, sy:1.30, mass:0.80, st:{ atk:3, hp:1, spd:5 } },
-  hira: { name:'ひら型', sx:1.16, sy:0.60, mass:1.10, st:{ atk:2, hp:5, spd:2 } },
+  maru: { name:'まる型', sx:1.00, sy:1.00, mass:1.00, st:{ atk:6, hp:6, spd:6 } },
+  hoso: { name:'ほそ型', sx:0.82, sy:1.30, mass:0.80, st:{ atk:3, hp:3, spd:12 } },
+  hira: { name:'ひら型', sx:1.16, sy:0.60, mass:1.10, st:{ atk:8, hp:8, spd:2 } },
 };
 const OPTIONS = {
-  none:  { name:'なし',   mass:1.00, st:{ atk:1, hp:1, spd:1 } },
-  toge:  { name:'トゲ',   mass:1.05, st:{ atk:3, hp:0, spd:0 } },
-  ring:  { name:'リング', mass:1.10, st:{ atk:0, hp:2, spd:1 } },
-  omori: { name:'おもり', mass:1.35, st:{ atk:2, hp:1, spd:0 } },
+  none:  { name:'なし',   mass:1.00, shift:null },
+  toge:  { name:'トゲ',   mass:1.05, shift:{ to:'atk', amount:9 } },
+  ring:  { name:'リング', mass:1.10, shift:{ to:'spd', amount:5 } },
+  omori: { name:'おもり', mass:1.35, shift:{ to:'hp',  amount:9 } },
 };
 const STAT_KEYS = [
   ['atk','こうげき'], ['hp','たいりょく'], ['spd','スピード'],
@@ -201,13 +202,25 @@ function calcStats(sel){
   const a = AXES[sel.axis], b = BODIES[sel.body], o = OPTIONS[sel.option];
   const st = {};
   for (const [k] of STAT_KEYS){
-    st[k] = a.st[k] + b.st[k] + o.st[k];   // 上限なし：合計値をそのまま使う
+    st[k] = a.st[k] + b.st[k];   // 軸＋本体の素の合計（常に30）
+  }
+  // オプションの付け替え：他の2ステータスから半分ずつを目安に、ある分だけ取る。
+  // 片方が足りなければもう片方から取るので、合計は変わらずマイナスにもならない
+  if (o.shift){
+    const { to, amount } = o.shift;
+    const others = STAT_KEYS.map(([k]) => k).filter(k => k !== to);
+    let takeA = Math.min(st[others[0]], Math.ceil(amount / 2));
+    let takeB = Math.min(st[others[1]], amount - takeA);
+    takeA = Math.min(st[others[0]], amount - takeB);   // Bが足りなければAから追加で取る
+    st[others[0]] -= takeA;
+    st[others[1]] -= takeB;
+    st[to] += takeA + takeB;
   }
   return {
     st,
-    atkMult: 0.55 + 0.09 * st.atk,   // 衝突で与えるダメージの倍率
-    maxSpin: 60 + 10 * st.hp,        // 最大体力（スピンの上限）
-    spdMult: 0.75 + 0.06 * st.spd,   // そのコマ個別の速度倍率
+    atkMult: 0.45 + 0.05 * st.atk,    // 衝突で与えるダメージの倍率
+    maxSpin: 30 + 6 * st.hp,          // 最大体力（スピンの上限）
+    spdMult: 0.70 + 0.032 * st.spd,   // そのコマ個別の速度倍率
     mass: a.mass * b.mass * o.mass,
     radius: b.sx,                 // 基準半径1 × 本体の横スケール
   };
